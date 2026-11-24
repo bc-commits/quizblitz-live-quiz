@@ -118,7 +118,7 @@ export async function renderEditor(id, ctx) {
   function move(arr, i, d) { const j = i + d; if (j < 0 || j >= arr.length) return; [arr[i], arr[j]] = [arr[j], arr[i]]; changed(true); }
 
   /** Editor for one answer block (multiple choice with 2-8 choices, or free text with aliases). */
-  function answerEditor(block, label, onChange, suggest) {
+  function answerEditor(block, label, onChange, suggest, meta) {
     const box = el('div', { class: 'field answer-block' });
     const draw = () => {
       const mode = select([['multiple-choice', 'QCM (propositions)'], ['free-text', 'Saisie libre']], block.mode, (v) => { block.mode = v; if (v === 'multiple-choice' && block.choices.length < MIN_CHOICES) block.choices = ['', '', '', '']; onChange(); draw(); });
@@ -166,7 +166,7 @@ export async function renderEditor(id, ctx) {
       const add = btn('+ Ajouter une proposition', () => { if (block.choices.length < MAX_CHOICES) { block.choices.push(''); onChange(); draw(); } }, 'small ghost');
       add.disabled = block.choices.length >= MAX_CHOICES;
       fill(box, head, el('span', { class: 'hint' }, `${block.choices.length} proposition(s) · de ${MIN_CHOICES} à ${MAX_CHOICES} · cochez la bonne réponse`), ...lines, dupWarn, missing,
-        el('div', { class: 'row', style: 'gap:6px' }, add, ...(ctx.hooks?.choiceActions ? ctx.hooks.choiceActions({ block, label, redraw: () => { onChange(); draw(); }, suggest }) : [])));
+        el('div', { class: 'row', style: 'gap:6px' }, add, ...(ctx.hooks?.choiceActions ? ctx.hooks.choiceActions({ block, label, redraw: () => { onChange(); draw(); }, suggest, meta }) : [])));
     };
     draw();
     return box;
@@ -230,12 +230,12 @@ export async function renderEditor(id, ctx) {
     if (qType === 'artist-title') {
       t.artistAnswer = t.artistAnswer || emptyAnswer();
       t.titleAnswer = t.titleAnswer || emptyAnswer();
-      answers = el('div', { class: 'grid2' }, answerEditor(t.artistAnswer, 'Artiste', () => changed(), suggestFor('artist')), answerEditor(t.titleAnswer, 'Titre', () => changed(), suggestFor('title')));
+      answers = el('div', { class: 'grid2' }, answerEditor(t.artistAnswer, 'Artiste', () => changed(), suggestFor('artist'), { t, key: 'artist', type: 'artist' }), answerEditor(t.titleAnswer, 'Titre', () => changed(), suggestFor('title'), { t, key: 'title', type: 'title' }));
     } else {
       const block = { mode: t.answerMode || 'multiple-choice', choices: t.choices, correctAnswer: t.correctAnswer, aliases: t.aliases, ignoreArticles: t.ignoreArticles, typoTolerance: t.typoTolerance };
       // Keep the track and the block in sync (the block is the editor's view of the track's answer fields).
       const sync = () => { t.answerMode = block.mode; t.choices = block.choices; t.correctAnswer = block.correctAnswer; t.aliases = block.aliases; t.ignoreArticles = block.ignoreArticles; t.typoTolerance = block.typoTolerance; changed(); };
-      answers = answerEditor(block, 'Réponse', sync, suggestFor(qType));
+      answers = answerEditor(block, 'Réponse', sync, suggestFor(qType), { t, key: 'main', type: qType });
     }
     const fillBtn = qType !== 'artist-title' && (t.answerMode || 'multiple-choice') === 'multiple-choice' ? btn('Mettre la bonne réponse depuis la fiche du morceau', () => {
       const value = suggestFor(qType)();

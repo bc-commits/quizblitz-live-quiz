@@ -105,3 +105,13 @@ body.admin { background: var(--bg); }
 .answer-block { border: 2px dashed var(--surface-2); border-radius: 10px; padding: 10px; color: var(--text); }
 .answer-block input.dup { border-color: var(--bad); background: #fff1f1; }
 .choice-line button { padding: 6px 9px; font-size: 13px; box-shadow: none; flex: none; }
+
+.modal { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55); display: grid; place-items: center; padding: 12px; }
+.modal-card { width: min(860px, 100%); max-height: 94vh; overflow: auto; }
+.thumb-sm { width: 44px; height: 44px; border-radius: 8px; background: var(--surface-2); display: grid; place-items: center; overflow: hidden; flex: none; }
+.thumb-sm img { width: 100%; height: 100%; object-fit: cover; }
+.report-table { width: 100%; border-collapse: collapse; background: var(--surface); color: var(--text); border-radius: var(--radius); overflow: hidden; font-size: 14px; }
+.report-table th, .report-table td { padding: 8px 10px; border-bottom: 1px solid var(--surface-2); text-align: left; vertical-align: top; }
+.report-table th { background: var(--surface-2); font-weight: 900; }
+.report-table tr.st-error td { background: #fff1f1; }
+.report-table tr.st-duplicate td { background: #fff8e6; }

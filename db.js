@@ -114,6 +114,60 @@ function open(file) {
       expires_at INTEGER NOT NULL
     );
   `);
+  // V1.1 -> V1.3 (idempotent; nothing is dropped): music library, blind test <-> library
+  // usage, audit log, structured answers, teams and reconnections in reports.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS music_tracks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      artist TEXT NOT NULL,
+      year INTEGER,
+      decade INTEGER,
+      genre TEXT NOT NULL DEFAULT '',
+      audio_url TEXT NOT NULL DEFAULT '',
+      cover_url TEXT NOT NULL DEFAULT '',
+      default_start REAL NOT NULL DEFAULT 0,
+      default_duration INTEGER,
+      artist_aliases TEXT NOT NULL DEFAULT '[]',
+      title_aliases TEXT NOT NULL DEFAULT '[]',
+      tags TEXT NOT NULL DEFAULT '[]',
+      notes TEXT NOT NULL DEFAULT '',
+      archived INTEGER NOT NULL DEFAULT 0,
+      norm_key TEXT NOT NULL,
+      search TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS music_norm ON music_tracks(norm_key);
+    CREATE INDEX IF NOT EXISTS music_artist ON music_tracks(archived, artist);
+    CREATE INDEX IF NOT EXISTS music_decade ON music_tracks(decade);
+    CREATE INDEX IF NOT EXISTS music_genre ON music_tracks(genre);
+    CREATE TABLE IF NOT EXISTS blind_test_tracks (
+      blind_test_id TEXT NOT NULL REFERENCES blind_tests(id) ON DELETE CASCADE,
+      track_id TEXT NOT NULL,
+      music_track_id TEXT NOT NULL,
+      round_index INTEGER NOT NULL,
+      position INTEGER NOT NULL,
+      PRIMARY KEY (blind_test_id, track_id)
+    );
+    CREATE INDEX IF NOT EXISTS btt_music ON blind_test_tracks(music_track_id);
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      at INTEGER NOT NULL,
+      actor TEXT,
+      action TEXT NOT NULL,
+      resource_type TEXT,
+      resource_id TEXT,
+      summary TEXT NOT NULL DEFAULT '',
+      ip TEXT
+    );
+    CREATE INDEX IF NOT EXISTS audit_at ON audit_log(at);
+  `);
+  addColumn(db, 'answers', 'detail_json', 'TEXT');
+  addColumn(db, 'players', 'team_name', 'TEXT');
+  addColumn(db, 'players', 'reconnects', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'games', 'teams_json', 'TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS players_game ON players(game_id)');
   db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
   return db;
 }
@@ -278,6 +332,112 @@ function loadLiveGames(db) {
   return db.prepare('SELECT game_json FROM live_games').all().map((r) => r.game_json);
 }
 
+// ---------------------------------------------------------------- music library
+
+const musicRow = (r) => r && ({
+  id: r.id, title: r.title, artist: r.artist, year: r.year, decade: r.decade, genre: r.genre, audioUrl: r.audio_url, coverUrl: r.cover_url,
+  defaultStartTime: r.default_start, defaultDuration: r.default_duration, artistAliases: JSON.parse(r.artist_aliases), titleAliases: JSON.parse(r.title_aliases),
+  tags: JSON.parse(r.tags), internalNotes: r.notes, archived: !!r.archived, createdAt: r.created_at, updatedAt: r.updated_at,
+  ...(r.uses !== undefined ? { uses: r.uses } : {}),
+});
+
+const getMusicTrack = (db, id) => musicRow(db.prepare('SELECT * FROM music_tracks WHERE id = ?').get(String(id)));
+
+/** Inserts or updates a validated music track (see lib/library.js). */
+function saveMusicTrack(db, t, normKey, search) {
+  const now = Date.now();
+  const vals = [t.title, t.artist, t.year, t.decade, t.genre, t.audioUrl, t.coverUrl, t.defaultStartTime, t.defaultDuration,
+    JSON.stringify(t.artistAliases), JSON.stringify(t.titleAliases), JSON.stringify(t.tags), t.internalNotes, normKey, search];
+  if (db.prepare('SELECT 1 FROM music_tracks WHERE id = ?').get(t.id)) {
+    db.prepare(`UPDATE music_tracks SET title=?, artist=?, year=?, decade=?, genre=?, audio_url=?, cover_url=?, default_start=?, default_duration=?,
+      artist_aliases=?, title_aliases=?, tags=?, notes=?, norm_key=?, search=?, updated_at=? WHERE id=?`).run(...vals, now, t.id);
+  } else {
+    if (db.prepare('SELECT COUNT(*) AS n FROM music_tracks').get().n >= 20000) throw Object.assign(new Error('Bibliothèque pleine (20 000 morceaux)'), { status: 409 });
+    db.prepare(`INSERT INTO music_tracks (title, artist, year, decade, genre, audio_url, cover_url, default_start, default_duration,
+      artist_aliases, title_aliases, tags, notes, norm_key, search, created_at, updated_at, id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, now, now, t.id);
+  }
+  return t.id;
+}
+
+const SORTS = { artist: 'artist COLLATE NOCASE, title COLLATE NOCASE', title: 'title COLLATE NOCASE', year: 'year, artist COLLATE NOCASE', recent: 'updated_at DESC', uses: 'uses DESC, artist COLLATE NOCASE' };
+
+/** Paginated, filtered search. `search` is matched against a normalised text column. */
+function listMusicTracks(db, f = {}) {
+  const where = [];
+  const args = [];
+  where.push(f.archived ? 'm.archived = 1' : 'm.archived = 0');
+  if (f.q) for (const w of String(f.q).split(' ').filter(Boolean).slice(0, 6)) { where.push('m.search LIKE ?'); args.push(`%${w}%`); }
+  if (f.artist) { where.push('m.artist = ? COLLATE NOCASE'); args.push(f.artist); }
+  if (f.year) { where.push('m.year = ?'); args.push(Number(f.year)); }
+  if (f.decade) { where.push('m.decade = ?'); args.push(Number(f.decade)); }
+  if (f.genre) { where.push('m.genre = ? COLLATE NOCASE'); args.push(f.genre); }
+  if (f.tag) { where.push('m.tags LIKE ?'); args.push(`%"${String(f.tag).toLowerCase().replace(/"/g, '')}"%`); }
+  if (f.hasCover === '1') where.push("m.cover_url != ''"); else if (f.hasCover === '0') where.push("m.cover_url = ''");
+  if (f.hasAudio === '1') where.push("m.audio_url != ''"); else if (f.hasAudio === '0') where.push("m.audio_url = ''");
+  const uses = '(SELECT COUNT(DISTINCT b.blind_test_id) FROM blind_test_tracks b WHERE b.music_track_id = m.id)';
+  if (f.used === '1') where.push(`${uses} > 0`); else if (f.used === '0') where.push(`${uses} = 0`);
+  const pageSize = Math.min(200, Math.max(1, Number(f.pageSize) || 50));
+  const page = Math.max(1, Number(f.page) || 1);
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM music_tracks m ${clause}`).get(...args).n;
+  const rows = db.prepare(`SELECT m.*, ${uses} AS uses FROM music_tracks m ${clause} ORDER BY ${SORTS[f.sort] || SORTS.artist} LIMIT ? OFFSET ?`)
+    .all(...args, pageSize, (page - 1) * pageSize);
+  return { items: rows.map(musicRow), total, page, pageSize };
+}
+
+function musicFacets(db) {
+  const col = (sql) => db.prepare(sql).all().map((r) => r.v).filter((v) => v !== null && v !== '');
+  const tags = new Map();
+  for (const r of db.prepare('SELECT tags FROM music_tracks WHERE archived = 0').all()) for (const t of JSON.parse(r.tags)) tags.set(t, (tags.get(t) || 0) + 1);
+  return {
+    genres: col('SELECT DISTINCT genre AS v FROM music_tracks WHERE archived = 0 ORDER BY genre COLLATE NOCASE'),
+    decades: col('SELECT DISTINCT decade AS v FROM music_tracks WHERE archived = 0 ORDER BY decade'),
+    tags: [...tags.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100).map(([t]) => t),
+    total: db.prepare('SELECT COUNT(*) AS n FROM music_tracks WHERE archived = 0').get().n,
+  };
+}
+
+/** Light columns of the whole library, used to generate distractors. */
+const musicCandidates = (db) => db.prepare('SELECT id, title, artist, year, genre FROM music_tracks WHERE archived = 0').all();
+const findMusicByNormKey = (db, key) => db.prepare('SELECT * FROM music_tracks WHERE norm_key = ?').all(key).map(musicRow);
+const setMusicArchived = (db, id, archived) => db.prepare('UPDATE music_tracks SET archived = ?, updated_at = ? WHERE id = ?').run(archived ? 1 : 0, Date.now(), id).changes > 0;
+const deleteMusicTrack = (db, id) => db.prepare('DELETE FROM music_tracks WHERE id = ?').run(id).changes > 0;
+const musicUsage = (db, id) => db.prepare(`SELECT DISTINCT b.blind_test_id AS id, t.title FROM blind_test_tracks b JOIN blind_tests t ON t.id = b.blind_test_id
+  WHERE b.music_track_id = ? ORDER BY t.title`).all(String(id));
+const allMusicMedia = (db) => db.prepare("SELECT audio_url AS a, cover_url AS c FROM music_tracks").all().flatMap((r) => [r.a, r.c]).filter((u) => u && u.startsWith('/media/'));
+
+/** Rebuilds the blind test <-> library usage rows for one blind test. */
+function syncBlindTestTracks(db, bt) {
+  db.prepare('DELETE FROM blind_test_tracks WHERE blind_test_id = ?').run(bt.id);
+  const ins = db.prepare('INSERT OR IGNORE INTO blind_test_tracks (blind_test_id, track_id, music_track_id, round_index, position) VALUES (?, ?, ?, ?, ?)');
+  bt.rounds.forEach((r, ri) => r.tracks.forEach((t, ti) => { if (t.musicTrackId) ins.run(bt.id, t.id, t.musicTrackId, ri, ti); }));
+}
+
+// ---------------------------------------------------------------- audit log
+
+function audit(db, { actor = null, action, resourceType = null, resourceId = null, summary = '', ip = null }) {
+  db.prepare('INSERT INTO audit_log (at, actor, action, resource_type, resource_id, summary, ip) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(Date.now(), actor, action, resourceType, resourceId === null ? null : String(resourceId).slice(0, 120), String(summary).slice(0, 300), ip);
+}
+
+function listAudit(db, { page = 1, pageSize = 50, action = '' } = {}) {
+  const size = Math.min(200, Math.max(1, Number(pageSize) || 50));
+  const p = Math.max(1, Number(page) || 1);
+  const clause = action ? 'WHERE action LIKE ?' : '';
+  const args = action ? [`${action}%`] : [];
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM audit_log ${clause}`).get(...args).n;
+  const items = db.prepare(`SELECT * FROM audit_log ${clause} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...args, size, (p - 1) * size)
+    .map((r) => ({ id: r.id, at: r.at, actor: r.actor, action: r.action, resourceType: r.resource_type, resourceId: r.resource_id, summary: r.summary, ip: r.ip }));
+  return { items, total, page: p, pageSize: size };
+}
+
+const purgeAudit = (db, days) => db.prepare('DELETE FROM audit_log WHERE at < ?').run(Date.now() - days * 86400000).changes;
+
+function mediaTotals(db) {
+  const r = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes FROM media').get();
+  return { count: r.n, bytes: r.bytes };
+}
+
 function stats(db) {
   const one = (sql) => db.prepare(sql).get().n;
   const tracks = allBlindTestJson(db).reduce((n, bt) => n + bt.rounds.reduce((m, r) => m + r.tracks.length, 0), 0);
@@ -286,6 +446,7 @@ function stats(db) {
     archivedBlindTests: one('SELECT COUNT(*) AS n FROM blind_tests WHERE archived = 1'),
     tracks,
     media: one('SELECT COUNT(*) AS n FROM media'),
+    libraryTracks: one('SELECT COUNT(*) AS n FROM music_tracks WHERE archived = 0'),
     gamesPlayed: one('SELECT COUNT(*) AS n FROM games'),
   };
 }
@@ -349,16 +510,18 @@ function saveGame(db, g, rankedPlayers, completed) {
     const { lastInsertRowid: gameId } = db.prepare(
       'INSERT INTO games (pin, title, quiz_json, started_at, ended_at, questions_played, completed, owner_id, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(g.pin, g.quiz.title, JSON.stringify(g.quiz), g.startedAt, Date.now(), played, completed ? 1 : 0, g.ownerId ?? null, g.quiz.kind || 'quiz');
-    const insPlayer = db.prepare('INSERT INTO players (game_id, name, avatar_json, score, rank) VALUES (?, ?, ?, ?, ?)');
-    const insAnswer = db.prepare(`INSERT INTO answers (game_id, player_id, question_index, choice, correct, points, response_ms, response_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    if (g.teams && g.teams.length) db.prepare('UPDATE games SET teams_json = ? WHERE id = ?').run(JSON.stringify({ teams: g.teams, method: g.teamOptions?.method || 'sum', topN: g.teamOptions?.topN || null }), gameId);
+    const teamName = (p) => (g.teams || []).find((t) => t.id === p.teamId)?.name || null;
+    const insPlayer = db.prepare('INSERT INTO players (game_id, name, avatar_json, score, rank, team_name, reconnects) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    const insAnswer = db.prepare(`INSERT INTO answers (game_id, player_id, question_index, choice, correct, points, response_ms, response_json, detail_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     rankedPlayers.forEach((p, i) => {
-      const { lastInsertRowid: pid } = insPlayer.run(gameId, p.name, JSON.stringify(p.avatar), p.score, i + 1);
+      const { lastInsertRowid: pid } = insPlayer.run(gameId, p.name, JSON.stringify(p.avatar), p.score, i + 1, teamName(p), p.reconnects || 0);
       g.history.forEach((byPlayer, q) => {
         const a = byPlayer[p.id];
         if (!a) return;
         insAnswer.run(gameId, pid, q, Number.isInteger(a.answer) ? a.answer : null, a.correct ? 1 : 0, a.points, a.responseMs,
-          a.answer === null || a.answer === undefined ? null : JSON.stringify(a.answer));
+          a.answer === null || a.answer === undefined ? null : JSON.stringify(a.answer), a.parts ? JSON.stringify({ parts: a.parts }) : null);
       });
     });
     db.exec('COMMIT');
@@ -480,6 +643,8 @@ module.exports = {
   listBlindTests, getBlindTest, saveBlindTest, setBlindTestArchived, deleteBlindTest, countBlindTestPlay, allBlindTestJson,
   addMedia, listMedia, getMedia, deleteMedia,
   saveLiveGame, deleteLiveGame, loadLiveGames, stats, recentGames,
+  getMusicTrack, saveMusicTrack, listMusicTracks, musicFacets, musicCandidates, findMusicByNormKey, setMusicArchived, deleteMusicTrack,
+  musicUsage, allMusicMedia, syncBlindTestTracks, audit, listAudit, purgeAudit, mediaTotals,
   listQuizzes, getQuiz, saveQuiz, deleteQuiz, countPlay,
   saveGame, listReports, getReport, deleteReport, reportCsv,
 };

@@ -21,6 +21,7 @@ const Media = require('./lib/media');
 const Scoring = require('./lib/scoring');
 const Answers = require('./lib/answers');
 const { serializeGame, restoreGame } = require('./lib/gamestore');
+const { createAdminExtra } = require('./lib/admin-extra');
 const { isOffensive, randomName, isGeneratedName } = require('./filter');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -40,6 +41,8 @@ const SECURE_COOKIES = process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE ===
 const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 const PUBLIC_URL = String(process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 const ALLOW_PUBLIC_QUIZ_HOSTING = process.env.ALLOW_PUBLIC_QUIZ_HOSTING !== 'false';
+const AUDIT_RETENTION_DAYS = Math.max(1, Number(process.env.AUDIT_RETENTION_DAYS) || 180);
+const REMOTE_CODE_TTL_MS = 5 * 60 * 1000;
 
 const GET_READY_MS = 4000;      // countdown before each quiz question opens
 const ANSWER_GRACE_MS = 400;    // accept answers that were in flight at time-up
@@ -181,7 +184,10 @@ setInterval(() => {
   }
 }, 20000).unref();
 
-const toHosts = (g, msg) => g.hostStreams.forEach((s) => push(s, msg));
+const toHosts = (g, msg) => {
+  g.hostStreams.forEach((s) => push(s, msg));
+  if (msg.type !== 'STATE' && g.remoteStreams && g.remoteStreams.size) g.remoteStreams.forEach((s) => push(s, remoteSnapshot(g)));
+};
 const toPlayer = (p, msg) => p.streams.forEach((s) => push(s, msg));
 
 // ---------- persistence of live games ----------
@@ -344,6 +350,7 @@ function leaderboard(g, n) {
 
 function broadcastState(g) {
   toHosts(g, hostSnapshot(g));
+  toRemotes(g);
   for (const p of g.players.values()) toPlayer(p, playerSnapshot(g, p));
   persist(g);
 }
@@ -496,7 +503,7 @@ const MIME = {
   '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.txt': 'text/plain; charset=utf-8',
 };
 
-const PAGES = { '/': 'index', '/host': 'host', '/play': 'play', '/admin': 'admin', '/library': 'library', '/reports': 'reports' };
+const PAGES = { '/': 'index', '/host': 'host', '/host/remote': 'remote', '/play': 'play', '/admin': 'admin', '/library': 'library', '/reports': 'reports' };
 const templates = new Map();
 function template(name) {
   if (!IS_PROD || !templates.has(name)) templates.set(name, fs.readFileSync(path.join(VIEWS_DIR, `${name}.html`), 'utf8'));
@@ -723,10 +730,23 @@ function handleReports(req, res, url, parts) {
 
 // ---------- administration ----------
 
+/** Audit log entry. Never pass passwords, cookies, tokens or file contents here. */
+function auditLog(actor, action, resourceType = null, resourceId = null, summary = '', ip = null) {
+  try { store.audit(db, { actor, action, resourceType, resourceId, summary, ip }); } catch (err) { console.error('Audit log failed:', err.message); }
+}
+
+// Last server errors shown on the admin dashboard (message only, no request data).
+const recentErrors = [];
+function noteError(err) {
+  recentErrors.unshift({ at: Date.now(), message: String(err && err.message || err).slice(0, 200) });
+  recentErrors.length = Math.min(recentErrors.length, 20);
+}
+
 /** Media URLs still used by the settings or any blind test. */
 function mediaInUse() {
   const used = new Set(Settings.referencedMedia(settings));
   for (const bt of store.allBlindTestJson(db)) for (const u of BT.referencedMedia(bt)) used.add(u);
+  for (const u of store.allMusicMedia(db)) used.add(u);
   return used;
 }
 
@@ -769,12 +789,19 @@ async function handleAdmin(req, res, url, parts) {
     }
     const body = await readBody(req, 4096);
     const user = store.checkLogin(db, body.email, body.password);
-    if (!user || user.role !== 'admin') return sendJson(res, 401, { error: 'Identifiants incorrects.' });
+    if (!user || user.role !== 'admin') {
+      // The IP is kept for failed logins only (security: spotting brute force); never the password.
+      auditLog(String(body.email || '').slice(0, 120) || null, 'admin.login_failed', 'session', null, 'Échec de connexion', clientIp(req));
+      return sendJson(res, 401, { error: 'Identifiants incorrects.' });
+    }
     const { token, maxAge } = store.createSession(db, user.id, ADMIN_SESSION_SECONDS);
     setAdminCookie(res, token, maxAge);
+    auditLog(user.email, 'admin.login', 'session', null, 'Connexion réussie');
     return sendJson(res, 200, { user: { email: user.email, name: user.name } });
   }
   if (action === 'logout' && req.method === 'POST') {
+    const who = currentAdmin(req);
+    if (who) auditLog(who.email, 'admin.logout', 'session');
     store.deleteSession(db, cookies(req)[ADMIN_COOKIE]);
     setAdminCookie(res, '', 0);
     return sendJson(res, 200, { ok: true });
@@ -783,6 +810,7 @@ async function handleAdmin(req, res, url, parts) {
   const admin = currentAdmin(req);
   if (action === 'me') return sendJson(res, 200, { user: admin ? { email: admin.email, name: admin.name } : null });
   if (!admin) return sendJson(res, 401, { error: 'Connexion administrateur requise.', code: 'ADMIN_SIGN_IN' });
+  if (await adminExtra.handle(req, res, url, parts, admin)) return;
 
   // --- dashboard
   if (action === 'dashboard' && req.method === 'GET') {
@@ -805,11 +833,14 @@ async function handleAdmin(req, res, url, parts) {
         if (next[k] && next[k].startsWith('/media/') && !(key && store.getMedia(db, key))) throw httpError(400, `Le fichier choisi pour ${k} n'existe pas`);
       }
       settings = store.saveSettings(db, next, admin.email);
+      const changedKeys = Object.keys(next).filter((k) => JSON.stringify(next[k]) !== JSON.stringify(before[k]) && !['updatedAt', 'updatedBy'].includes(k));
+      auditLog(admin.email, 'settings.update', 'settings', null, `Modifié : ${changedKeys.join(', ') || 'aucun champ'}`.slice(0, 300));
       await removeMediaIfUnused(Settings.IMAGE_FIELDS.map((k) => before[k]).filter((u, i) => u && u !== settings[Settings.IMAGE_FIELDS[i]]));
       return sendJson(res, 200, { settings });
     }
     if (req.method === 'POST' && parts[3] === 'reset-theme') {
       settings = store.saveSettings(db, Settings.mergeSettings(settings, { ...Settings.DEFAULT_THEME }), admin.email);
+      auditLog(admin.email, 'settings.reset_theme', 'settings');
       return sendJson(res, 200, { settings });
     }
   }
@@ -825,13 +856,15 @@ async function handleAdmin(req, res, url, parts) {
         const input = body.blindTest;
         // Import or creation: never overwrite an existing blind test by accident.
         if (input && input.id && store.getBlindTest(db, String(input.id))) delete input.id;
-        const { blindTest, warnings } = BT.assertValid(input);
+        const { blindTest, warnings, upgraded } = BT.assertValid(input, blindOptions());
         store.saveBlindTest(db, blindTest);
-        return sendJson(res, 201, { id: blindTest.id, blindTest, warnings });
+        store.syncBlindTestTracks(db, blindTest);
+        auditLog(admin.email, 'blindtest.create', 'blind_test', blindTest.id, blindTest.title);
+        return sendJson(res, 201, { id: blindTest.id, blindTest, warnings, upgraded });
       }
     } else if (btId === 'validate' && req.method === 'POST') {
-      const r = BT.validateBlindTest((await readBody(req, 2 * 1024 * 1024)).blindTest);
-      return sendJson(res, 200, { errors: r.errors, warnings: r.warnings, tracks: r.blindTest ? BT.countTracks(r.blindTest) : 0 });
+      const r = BT.validateBlindTest((await readBody(req, 2 * 1024 * 1024)).blindTest, blindOptions());
+      return sendJson(res, 200, { errors: r.errors, warnings: r.warnings, upgraded: r.upgraded, tracks: r.blindTest ? BT.countTracks(r.blindTest) : 0 });
     } else {
       const row = store.getBlindTest(db, btId);
       if (!row) return sendJson(res, 404, { error: 'Blind test introuvable' });
@@ -840,26 +873,33 @@ async function handleAdmin(req, res, url, parts) {
         if (req.method === 'PUT') {
           const input = { ...(await readBody(req, 2 * 1024 * 1024)).blindTest, id: row.id };
           const before = BT.referencedMedia(row.blindTest);
-          const { blindTest, warnings } = BT.assertValid(input);
+          const { blindTest, warnings } = BT.assertValid(input, blindOptions());
           store.saveBlindTest(db, blindTest);
+          store.syncBlindTestTracks(db, blindTest);
+          auditLog(admin.email, 'blindtest.update', 'blind_test', row.id, blindTest.title);
           const after = new Set(BT.referencedMedia(blindTest));
           await removeMediaIfUnused(before.filter((u) => !after.has(u)));
           return sendJson(res, 200, { id: row.id, blindTest, warnings });
         }
         if (req.method === 'DELETE') {
           store.deleteBlindTest(db, row.id);
+          auditLog(admin.email, 'blindtest.delete', 'blind_test', row.id, row.blindTest.title);
           await removeMediaIfUnused(BT.referencedMedia(row.blindTest));
           return sendJson(res, 200, { ok: true });
         }
       }
       if (sub === 'duplicate' && req.method === 'POST') {
         const copy = { ...structuredClone(row.blindTest), id: undefined, title: `${row.blindTest.title} (copie)`.slice(0, 100) };
-        const { blindTest } = BT.assertValid(copy);
+        const { blindTest } = BT.assertValid(copy, blindOptions());
         store.saveBlindTest(db, blindTest);
+        store.syncBlindTestTracks(db, blindTest);
+        auditLog(admin.email, 'blindtest.create', 'blind_test', blindTest.id, `Copie de ${row.id}`);
         return sendJson(res, 201, { id: blindTest.id });
       }
       if (sub === 'archive' && req.method === 'POST') {
-        store.setBlindTestArchived(db, row.id, (await readBody(req, 1024)).archived !== false);
+        const archived = (await readBody(req, 1024)).archived !== false;
+        store.setBlindTestArchived(db, row.id, archived);
+        auditLog(admin.email, archived ? 'blindtest.archive' : 'blindtest.unarchive', 'blind_test', row.id, row.title);
         return sendJson(res, 200, { ok: true });
       }
       if (sub === 'export' && req.method === 'GET') {
@@ -895,6 +935,7 @@ async function handleAdmin(req, res, url, parts) {
       const key = Media.newKey(ext);
       await mediaStore.put(key, buf, mime);
       store.addMedia(db, { id: key, kind, mime, size: buf.length, originalName: originalName.replace(/[^\p{L}\p{N} ._()-]/gu, '_') || key });
+      auditLog(admin.email, 'media.upload', 'media', key, `${kind}, ${Math.round(buf.length / 1024)} Ko`);
       return sendJson(res, 201, { media: store.getMedia(db, key) });
     }
     if (req.method === 'DELETE' && parts[3]) {
@@ -903,6 +944,7 @@ async function handleAdmin(req, res, url, parts) {
       if (mediaInUse().has(m.url)) return sendJson(res, 409, { error: 'Ce fichier est encore utilisé (paramètres ou blind test).' });
       store.deleteMedia(db, m.id);
       await mediaStore.remove(m.id).catch(() => {});
+      auditLog(admin.email, 'media.delete', 'media', m.id, m.originalName);
       return sendJson(res, 200, { ok: true });
     }
   }
@@ -913,9 +955,10 @@ async function handleAdmin(req, res, url, parts) {
     const g = parts[3] && games.get(parts[3]);
     if (!g) return sendJson(res, 404, { error: 'Partie introuvable' });
     // Lets the admin take back control of a game (e.g. after closing the host tab).
-    if (parts[4] === 'host-key' && req.method === 'POST') return sendJson(res, 200, { pin: g.pin, hostKey: g.hostKey });
-    if (parts[4] === 'end' && req.method === 'POST') { if (g.state !== S.ENDED) finishGame(g, false); return sendJson(res, 200, { ok: true }); }
-    if (!parts[4] && req.method === 'DELETE') { dropGame(g.pin); return sendJson(res, 200, { ok: true }); }
+    if (parts[4] === 'host-key' && req.method === 'POST') { auditLog(admin.email, 'game.resume', 'game', g.pin, g.quiz.title); return sendJson(res, 200, { pin: g.pin, hostKey: g.hostKey }); }
+    if (parts[4] === 'remote-token' && req.method === 'POST') { auditLog(admin.email, 'game.remote', 'game', g.pin, 'Télécommande ouverte depuis l’administration'); return sendJson(res, 200, { remoteToken: issueRemoteToken(g) }); }
+    if (parts[4] === 'end' && req.method === 'POST') { if (g.state !== S.ENDED) finishGame(g, false); auditLog(admin.email, 'game.end', 'game', g.pin, g.quiz.title); return sendJson(res, 200, { ok: true }); }
+    if (!parts[4] && req.method === 'DELETE') { auditLog(admin.email, 'game.delete', 'game', g.pin, g.quiz.title); dropGame(g.pin); return sendJson(res, 200, { ok: true }); }
   }
 
   return sendJson(res, 404, { error: 'Not found' });
@@ -923,13 +966,51 @@ async function handleAdmin(req, res, url, parts) {
 
 // ---------- game API ----------
 
+// ---------- host remote control ----------
+// The projected host screen shows a short-lived, single-use pairing code (QR). The
+// phone exchanges it for a remote token (stored hashed with the game) that gives the
+// same commands as the host plus the secret track info. The permanent hostKey is never
+// put in the QR code.
+const tokenHash = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+
+function issueRemoteToken(g) {
+  const token = crypto.randomBytes(24).toString('base64url');
+  g.remotes = [...(g.remotes || []), tokenHash(token)].slice(-10);
+  persist(g);
+  return token;
+}
+const isRemote = (g, token) => typeof token === 'string' && token.length > 20 && (g.remotes || []).includes(tokenHash(token));
+
+/** Secret info for the remote only: current and next track answers and notes. */
+function remoteSecret(g) {
+  const q = currentQ(g);
+  const next = g.quiz.questions[g.qIndex + 1];
+  const info = (x) => x && x.blind ? { title: x.blind.reveal.title, artist: x.blind.reveal.artist, year: x.blind.reveal.year, correctText: Q.describeCorrect(x), notes: x.blind.notes || '', roundTitle: x.blind.roundTitle, multiplier: x.blind.multiplier || 1 }
+    : x ? { title: x.text, artist: '', year: null, correctText: Q.isScored(x) ? Q.describeCorrect(x) : '', notes: '', roundTitle: '', multiplier: 1 } : null;
+  return { current: g.state === S.ENDED ? null : info(q), next: g.state === S.LOBBY ? info(q) : info(next), audio: g.audioStatus || null, answeredCount: g.answers ? g.answers.size : 0,
+    endsAt: g.state === S.QUESTION ? g.endsAt : null, startsAt: g.state === S.GET_READY ? g.questionStartsAt : null, index: g.qIndex, total: g.quiz.questions.length,
+    ambiguous: g.state === S.REVEAL ? ambiguousAnswers(g) : [] };
+}
+const remoteSnapshot = (g) => ({ ...hostSnapshot(g), type: 'STATE', secret: remoteSecret(g) });
+const toRemotes = (g) => (g.remoteStreams || new Set()).forEach((s) => push(s, remoteSnapshot(g)));
+
+/** Typed answers just outside the tolerance, offered to the host for manual validation. */
+function ambiguousAnswers(g) {
+  const out = [];
+  for (const p of g.players.values()) for (const part of p.lastResult?.parts || []) {
+    if (part.ambiguous && !part.correct) out.push({ playerId: p.id, name: p.name, key: part.key, label: part.label, text: part.yourAnswer, expected: part.correctText });
+  }
+  return out.slice(0, 30);
+}
+
 /** Options for validating / converting blind tests: library lookup and global scoring. */
 function blindOptions() {
   return { library: typeof store.getMusicTrack === 'function' ? (id) => store.getMusicTrack(db, id) : undefined,
     appScoring: Scoring.fromClassicSettings(settings.scoring) };
 }
 
-const HOST_ACTIONS = new Set(['start', 'skip', 'close', 'next', 'hide-board', 'pause', 'resume', 'restart-track', 'recover', 'kick', 'lock', 'unlock', 'end', 'set-flow']);
+const HOST_ACTIONS = new Set(['start', 'skip', 'close', 'next', 'hide-board', 'pause', 'resume', 'restart-track', 'recover', 'kick', 'lock', 'unlock', 'end', 'set-flow',
+  'audio-status', 'revoke-remotes', 'accept-answer', 'assign-team']);
 
 function hostActionHandler(g, body) {
   const now = Date.now();
@@ -939,7 +1020,19 @@ function hostActionHandler(g, body) {
   if (body.expectState && body.expectState !== g.state) throw httpError(409, 'La partie a déjà changé de phase', { code: 'STALE_STATE' });
   const sig = `${body.action}:${g.state}:${g.qIndex}:${body.playerId || ''}`;
   if (g.lastCommand && g.lastCommand.sig === sig && now - g.lastCommand.at < 800 && !['lock', 'unlock'].includes(body.action)) return { deduped: true };
+  if (body.action === 'audio-status') {
+    // Reported by the host screen (where the audio plays) for the remote; not persisted.
+    g.audioStatus = { status: String(body.status || '').slice(0, 20), error: String(body.error || '').slice(0, 160), at: now };
+    toRemotes(g);
+    return { deduped: false };
+  }
   switch (body.action) {
+    case 'revoke-remotes':
+      g.remotes = [];
+      g.remoteCodes = [];
+      (g.remoteStreams || new Set()).forEach((s) => s.end());
+      persist(g);
+      break;
     case 'start':
       if (g.state !== S.LOBBY) throw httpError(409, 'La partie a déjà commencé');
       if (g.players.size === 0) throw httpError(409, 'Attendez au moins un joueur');
@@ -998,6 +1091,7 @@ function hostActionHandler(g, body) {
     case 'kick': {
       const p = g.players.get(String(body.playerId));
       if (p) {
+        auditLog('animateur', 'game.kick', 'game', g.pin, `Joueur retiré : ${p.name}`);
         toPlayer(p, { type: 'KICKED' });
         p.streams.forEach((s) => s.end());
         g.players.delete(p.id);
@@ -1103,6 +1197,42 @@ async function handleApi(req, res, url) {
 
   const isHost = (key) => typeof key === 'string' && key.length === g.hostKey.length
     && crypto.timingSafeEqual(Buffer.from(key), Buffer.from(g.hostKey));
+
+  // Pairing code for the host remote (shown as a QR code on the host screen).
+  if (req.method === 'POST' && action === 'remote-code') {
+    const body = await readBody(req, 4096);
+    if (!isHost(body.key)) return sendJson(res, 403, { error: 'Not the host' });
+    const code = Array.from(crypto.randomBytes(8), (b) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[b % 32]).join('');
+    const now = Date.now();
+    g.remoteCodes = [...(g.remoteCodes || []).filter((c) => c.expiresAt > now), { hash: tokenHash(code), expiresAt: now + REMOTE_CODE_TTL_MS }].slice(-5);
+    return sendJson(res, 200, { code, expiresAt: now + REMOTE_CODE_TTL_MS });
+  }
+  if (req.method === 'POST' && action === 'remote-pair') {
+    if (rateLimited(req, 'remote-pair', 10)) return sendJson(res, 429, { error: 'Trop de tentatives. Patientez une minute.' });
+    const body = await readBody(req, 4096);
+    const h = tokenHash(String(body.code || '').toUpperCase().replace(/[^A-Z0-9]/g, ''));
+    const now = Date.now();
+    const found = (g.remoteCodes || []).find((c) => c.hash === h && c.expiresAt > now);
+    if (!found) return sendJson(res, 403, { error: 'Code invalide ou expiré. Affichez un nouveau QR code sur l’écran animateur.', code: 'BAD_REMOTE_CODE' });
+    g.remoteCodes = g.remoteCodes.filter((c) => c !== found); // single use
+    return sendJson(res, 200, { remoteToken: issueRemoteToken(g), title: g.quiz.title });
+  }
+  if (req.method === 'GET' && action === 'remote-events') {
+    if (!isRemote(g, url.searchParams.get('token'))) return sendJson(res, 403, { error: 'Télécommande non autorisée', code: 'REMOTE_DENIED' });
+    const s = openStream(req, res);
+    g.remoteStreams = g.remoteStreams || new Set();
+    g.remoteStreams.add(s);
+    push(s, remoteSnapshot(g));
+    req.on('close', () => g.remoteStreams.delete(s));
+    return;
+  }
+  if (req.method === 'POST' && action === 'remote-action') {
+    const body = await readBody(req, 8192);
+    if (!isRemote(g, body.token)) return sendJson(res, 403, { error: 'Télécommande non autorisée', code: 'REMOTE_DENIED' });
+    if (body.action === 'revoke-remotes') throw httpError(403, 'Action réservée à l’écran animateur');
+    const r = hostActionHandler(g, body);
+    return sendJson(res, 200, { ok: true, state: g.state, deduped: !!(r && r.deduped) });
+  }
 
   // Host event stream
   if (req.method === 'GET' && action === 'host-events') {
@@ -1251,7 +1381,7 @@ const server = http.createServer(async (req, res) => {
     return serveStatic(req, res, url.pathname);
   } catch (err) {
     const status = err.status || 400;
-    if (status >= 500 || !err.status) console.error(err);
+    if (status >= 500 || !err.status) { console.error(err); noteError(err); }
     if (!res.headersSent) sendJson(res, status, { error: err.message || 'Requête invalide', code: err.code, details: err.details });
     else res.end();
   }
@@ -1264,8 +1394,13 @@ function shutdown() {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
+const adminExtra = createAdminExtra({ db, store, readBody, sendJson, httpError, blindOptions, removeMediaIfUnused,
+  auditLog: (actor, action, type, id, summary) => auditLog(actor, action, type, id, summary) });
+
 bootstrapAdmin();
 restoreGames();
+try { const n = store.purgeAudit(db, AUDIT_RETENTION_DAYS); if (n) console.log(`Audit log: ${n} old entr${n > 1 ? 'ies' : 'y'} purged.`); } catch { /* ignore */ }
+setInterval(() => { try { store.purgeAudit(db, AUDIT_RETENTION_DAYS); } catch { /* ignore */ } }, 24 * 3600 * 1000).unref();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`${settings.appName} running`);

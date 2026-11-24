@@ -329,14 +329,37 @@ const player = new ExcerptPlayer({
     if (st === 'playing') { $('c-audio-err').textContent = ''; soundBlocked = false; }
     if (st === 'blocked') { soundBlocked = true; $('sound-gate').classList.remove('hidden'); }
     document.querySelectorAll('.eq').forEach((e) => e.classList.toggle('paused', st !== 'playing'));
+    if (st !== 'error') reportAudio(st);
   },
-  onError: (text) => { $('c-audio-err').textContent = `🔇 ${text}`; },
+  onError: (text) => { $('c-audio-err').textContent = `🔇 ${text}`; reportAudio('error', text); },
   onProgress: (frac) => { const bar = $('q-audio-bar').firstElementChild; if (bar) bar.style.width = `${frac * 100}%`; },
 });
 // Keep the screens clear of the fixed control bar, whatever its height (it wraps on narrow screens).
 new ResizeObserver(() => document.body.style.setProperty('--ctrl-h', `${$('ctrl').offsetHeight}px`)).observe($('ctrl'));
 $('c-volume').value = String(player.master);
 $('c-volume').addEventListener('input', (e) => player.setVolume(Number(e.target.value)));
+
+/** Tells the server (hence the remote) what the audio is doing on this screen. Best effort. */
+function reportAudio(status, error = '') {
+  if (!pin || !hostKey) return;
+  api(`/api/games/${pin}/host-action`, { key: hostKey, action: 'audio-status', status, error }).catch(() => {});
+}
+
+async function openRemoteGate() {
+  try {
+    const { code } = await api(`/api/games/${pin}/remote-code`, { key: hostKey });
+    let base = location.origin;
+    try { const info = await api('/api/info'); if (info.publicUrl) base = info.publicUrl; else if (['localhost', '127.0.0.1'].includes(location.hostname) && info.lanUrls[0]) base = info.lanUrls[0]; } catch { /* keep origin */ }
+    // The code travels in the URL fragment: never sent to servers or written in access logs.
+    const url = `${base}/host/remote?pin=${pin}#code=${code}`;
+    const box = $('remote-qr');
+    box.replaceChildren();
+    if (window.QRCode) new window.QRCode(box, { text: url, width: 200, height: 200, correctLevel: window.QRCode.CorrectLevel.M });
+    $('remote-code').textContent = code;
+    $('remote-url').textContent = `${base.replace(/^https?:\/\//, '')}/host/remote · PIN ${pin}`;
+    $('remote-gate').classList.remove('hidden');
+  } catch (ex) { alert(ex.message); }
+}
 
 const STATE_LABELS = { LOBBY: 'Lobby', GET_READY: 'Compte à rebours', QUESTION: 'Réponses ouvertes', REVEAL: 'Révélation', SCOREBOARD: 'Classement', ENDED: 'Fin de partie' };
 
@@ -808,6 +831,14 @@ $('c-close').addEventListener('click', () => hostAction('skip'));
 $('c-recover').addEventListener('click', () => { hostAction('recover'); if (lastMsg) syncAudio(lastMsg, true); });
 $('c-end').addEventListener('click', () => { if (confirm('Terminer la partie maintenant ? Le classement actuel deviendra le classement final.')) hostAction('end'); });
 $('ctrl-toggle').addEventListener('click', () => $('ctrl').classList.toggle('collapsed'));
+$('c-remote').addEventListener('click', openRemoteGate);
+$('btn-remote').addEventListener('click', openRemoteGate);
+$('btn-remote-close').addEventListener('click', () => $('remote-gate').classList.add('hidden'));
+$('btn-revoke').addEventListener('click', async () => {
+  if (!confirm('Déconnecter toutes les télécommandes associées à cette partie ?')) return;
+  await hostAction('revoke-remotes');
+  $('remote-gate').classList.add('hidden');
+});
 $('c-flow').addEventListener('change', (e) => {
   const mode = e.target.value || null;
   if (mode === 'automatic' && !confirm('Activer l’enchaînement entièrement automatique ? Les morceaux s’enchaîneront seuls (vous pourrez toujours mettre en pause).')) { e.target.value = lastMsg?.flow?.override || ''; return; }

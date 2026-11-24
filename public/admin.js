@@ -2,6 +2,7 @@
 import { api, el, brand } from '/shared.js';
 import { ExcerptPlayer } from '/audio-player.js';
 import { renderEditor as renderBlindTestEditor } from '/admin-editor.js';
+import { registerEditorHooks, renderLibrary, resizeImage } from '/admin-library.js';
 
 const $ = (id) => document.getElementById(id);
 const view = () => $('view');
@@ -42,7 +43,11 @@ const fill = (node, ...kids) => node.replaceChildren(...kids.flat().filter((k) =
 const page = (title, ...children) => fill(view(), el('h1', { class: 'page' }, title), ...children);
 
 /** Uploads a file as raw bytes; the server checks its real type. */
-async function upload(kind, file) {
+// Images are resized in the browser before upload (the server still checks type and size).
+const RESIZE = { logo: [1200, 1200], cover: [1000, 1000], home: [1920, 1920] };
+
+async function upload(kind, file, purpose) {
+  if (kind === 'image' && RESIZE[purpose]) file = await resizeImage(file, ...RESIZE[purpose]);
   const res = await fetch(`/api/admin/media?kind=${encodeURIComponent(kind)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream', 'X-QuizBlitz': '1', 'X-Filename': encodeURIComponent(file.name) },
@@ -120,7 +125,12 @@ const routes = [
   [/^#\/blindtests\/([\w-]+)$/, 'blindtests', (m) => renderEditor(m[1])],
   [/^#\/import$/, 'import', renderImport],
   [/^#\/games$/, 'games', renderGames],
-  [/^#\/media\/(audio|image|favicon)$/, null, (m) => renderMedia(m[1])],
+  [/^#\/media\/(audio|image|favicon|unused)$/, null, (m) => renderMedia(m[1])],
+  [/^#\/library$/, 'library', () => renderLibrary(libCtx(), 'list')],
+  [/^#\/library\/new$/, 'library-new', () => renderLibrary(libCtx(), 'new')],
+  [/^#\/library\/import$/, 'library-import', () => renderLibrary(libCtx(), 'import')],
+  [/^#\/library\/edit\/([\w-]+)$/, 'library', (m) => renderLibrary(libCtx(), 'edit', m[1])],
+  [/^#\/audit$/, 'audit', renderAudit],
   [/^#\/settings\/(general|appearance|game)$/, null, (m) => renderSettings(m[1])],
 ];
 
@@ -276,7 +286,9 @@ function renderImport() {
 // ---------------------------------------------------------------- blind test editor
 
 const previewPlayer = new ExcerptPlayer({ fadeIn: 0.3, fadeOut: 0.6 });
-const editorHooks = {}; // filled by later features (music library, distractors)
+const editorHooks = {};
+const libCtx = () => ({ page, field, select, check, btn, toast, upload, pickFile, fmtDate, previewPlayer });
+registerEditorHooks(editorHooks, libCtx());
 
 function renderEditor(id) {
   return renderBlindTestEditor(id, {
@@ -295,9 +307,12 @@ async function renderMedia(kind) {
     image: 'PNG, JPEG ou WebP, 2 Mo maximum. Le SVG est refusé pour des raisons de sécurité.',
     favicon: 'PNG ou ICO, 512 Ko maximum (idéalement carré, 64×64 ou plus).',
   };
-  const { media } = await api(`/api/admin/media?kind=${kind}`);
+  titles.unused = 'Médias inutilisés';
+  hints.unused = 'Fichiers qui ne servent plus nulle part (paramètres, blind tests, bibliothèque). Vous pouvez les supprimer sans risque.';
+  const all = (await api(`/api/admin/media${kind === 'unused' ? '' : `?kind=${kind}`}`)).media;
+  const media = kind === 'unused' ? all.filter((m) => !m.inUse) : all;
   page(titles[kind],
-    el('div', { class: 'toolbar' },
+    el('div', { class: 'toolbar' }, kind === 'unused' ? null :
       btn('⬆ Téléverser…', async () => {
         const files = await pickFile(accepts[kind], true);
         let ok = 0;
@@ -307,7 +322,7 @@ async function renderMedia(kind) {
       }, 'accent small'),
       el('span', { class: 'hint' }, hints[kind])),
     media.length ? el('div', { class: 'list' }, ...media.map((m) => el('div', { class: 'item' },
-      kind === 'audio' ? el('audio', { controls: '', preload: 'none', src: m.url, style: 'max-width:260px' }) : el('div', { class: 'img-field' }, el('span', { class: 'thumb' }, el('img', { src: m.url, alt: '' }))),
+      m.kind === 'audio' ? el('audio', { controls: '', preload: 'none', src: m.url, style: 'max-width:260px' }) : el('div', { class: 'img-field' }, el('span', { class: 'thumb' }, el('img', { src: m.url, alt: '' }))),
       el('div', { class: 'grow' }, el('div', { class: 'title' }, m.originalName), el('div', { class: 'meta' }, `${fmtSize(m.size)} · ${fmtDate(m.createdAt)} · ${m.url}`)),
       el('span', { class: `tag ${m.inUse ? 'ok' : ''}` }, m.inUse ? 'utilisé' : 'inutilisé'),
       btn('📋 Copier l’URL', () => navigator.clipboard?.writeText(m.url).then(() => toast('URL copiée')), 'small ghost'),
@@ -315,6 +330,34 @@ async function renderMedia(kind) {
         if (!confirm(`Supprimer définitivement « ${m.originalName} » ?`)) return;
         try { await api(`/api/admin/media/${m.id}`, undefined, 'DELETE'); toast('Fichier supprimé'); renderMedia(kind); } catch (ex) { toast(ex.message, true); }
       }, 'small ghost')))) : el('p', { class: 'muted' }, 'Aucun fichier.'));
+}
+
+// ---------------------------------------------------------------- audit log
+
+async function renderAudit() {
+  const f = { page: 1, pageSize: 50, action: '' };
+  const list = el('div');
+  const pager = el('div', { class: 'row' });
+  const LABELS = { 'admin.login': 'Connexion', 'admin.login_failed': 'Échec de connexion', 'admin.logout': 'Déconnexion', 'settings.update': 'Paramètres modifiés',
+    'settings.reset_theme': 'Thème restauré', 'media.upload': 'Média téléversé', 'media.delete': 'Média supprimé', 'library.create': 'Morceau créé', 'library.update': 'Morceau modifié',
+    'library.archive': 'Morceau archivé', 'library.unarchive': 'Morceau désarchivé', 'library.delete': 'Morceau supprimé', 'library.import': 'Import bibliothèque',
+    'blindtest.create': 'Blind test créé', 'blindtest.update': 'Blind test modifié', 'blindtest.archive': 'Blind test archivé', 'blindtest.unarchive': 'Blind test désarchivé',
+    'blindtest.delete': 'Blind test supprimé', 'blindtest.convert': 'Blind test lié à la bibliothèque', 'game.resume': 'Partie reprise', 'game.remote': 'Télécommande ouverte',
+    'game.end': 'Partie terminée (forcée)', 'game.delete': 'Partie supprimée', 'game.kick': 'Joueur exclu', 'game.accept_answer': 'Réponse validée à la main' };
+  async function load() {
+    const r = await api(`/api/admin/audit?page=${f.page}&pageSize=${f.pageSize}&action=${encodeURIComponent(f.action)}`);
+    list.replaceChildren(el('table', { class: 'report-table' },
+      el('thead', {}, el('tr', {}, ...['Date', 'Qui', 'Action', 'Ressource', 'Détail', 'IP'].map((h) => el('th', {}, h)))),
+      el('tbody', {}, ...r.items.map((x) => el('tr', {}, el('td', {}, fmtDate(x.at)), el('td', {}, x.actor || '—'), el('td', {}, LABELS[x.action] || x.action),
+        el('td', {}, [x.resourceType, x.resourceId].filter(Boolean).join(' ')), el('td', {}, x.summary), el('td', {}, x.ip || ''))))));
+    const pages = Math.max(1, Math.ceil(r.total / r.pageSize));
+    pager.replaceChildren(btn('◀', () => { if (f.page > 1) { f.page--; load(); } }, 'small ghost'), el('span', { class: 'sub' }, `Page ${r.page}/${pages} · ${r.total} entrée(s)`), btn('▶', () => { if (f.page < pages) { f.page++; load(); } }, 'small ghost'));
+  }
+  const filter = select([['', 'Toutes les actions'], ['admin', 'Connexions'], ['settings', 'Paramètres'], ['media', 'Médias'], ['library', 'Bibliothèque'], ['blindtest', 'Blind tests'], ['game', 'Parties']], '', (v) => { f.action = v; f.page = 1; load(); });
+  filter.style.width = 'auto';
+  page('Journal d’audit', el('p', { class: 'hint' }, 'Actions importantes des administrateurs. Aucun mot de passe, cookie, jeton ou contenu de fichier n’y est enregistré. L’adresse IP n’est conservée que pour les échecs de connexion. Conservation : AUDIT_RETENTION_DAYS (180 jours par défaut).'),
+    el('div', { class: 'toolbar' }, filter), list, pager);
+  load();
 }
 
 // ---------------------------------------------------------------- settings
@@ -444,7 +487,7 @@ async function renderSettings(section) {
       btn('⬆ Téléverser', async () => {
         const [file] = await pickFile(kind === 'favicon' ? 'image/png,image/x-icon,.ico' : 'image/png,image/jpeg,image/webp');
         if (!file) return;
-        try { const m = await upload(kind, file); draft[key] = m.url; drawThumb(); changed(); toast('Image téléversée — enregistrez pour l’appliquer'); }
+        try { const m = await upload(kind, file, key === 'homeImageUrl' ? 'home' : 'logo'); draft[key] = m.url; drawThumb(); changed(); toast('Image téléversée — enregistrez pour l’appliquer'); }
         catch (ex) { toast(ex.message, true); }
       }, 'small'),
       btn('Retirer', () => { draft[key] = ''; drawThumb(); changed(); }, 'small ghost')),
