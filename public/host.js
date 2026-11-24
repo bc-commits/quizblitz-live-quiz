@@ -475,9 +475,31 @@ function renderPlayers(players) {
   document.getElementById('player-count').textContent = players.length;
   document.getElementById('btn-start').disabled = players.length === 0;
   document.getElementById('lobby-hint').textContent = players.length ? `${players.length} joueur${players.length > 1 ? 's' : ''} · En attente du lancement` : 'En attente des joueurs…';
-  document.getElementById('players').replaceChildren(...players.map((p) =>
-    el('span', { class: `chip pop${p.connected ? '' : ' off'}` }, avatarEl(p.avatar, 40), p.name,
-      el('button', { title: `Retirer ${p.name}`, 'aria-label': `Retirer ${p.name}`, onclick: () => hostAction('kick', { playerId: p.id }) }, '✕'))));
+  const teams = lastMsg && lastMsg.teams;
+  const chip = (p) => el('span', { class: `chip pop${p.connected ? '' : ' off'}` }, avatarEl(p.avatar, 40), p.name,
+    teams && lastMsg.state === 'LOBBY' ? (() => {
+      // The host can move a player to another team in the lobby.
+      const sel = el('select', { 'aria-label': `Équipe de ${p.name}`, class: 'team-select', onchange: (e) => hostAction('assign-team', { playerId: p.id, teamId: e.target.value }) },
+        el('option', { value: '' }, '—'), ...teams.map((t) => el('option', { value: t.id }, `${t.icon} ${t.name}`)));
+      sel.value = p.teamId || '';
+      return sel;
+    })() : null,
+    el('button', { title: `Retirer ${p.name}`, 'aria-label': `Retirer ${p.name}`, onclick: () => { if (confirm(`Retirer ${p.name} de la partie ?`)) hostAction('kick', { playerId: p.id }); } }, '✕'));
+  if (!teams) { document.getElementById('players').replaceChildren(...players.map(chip)); return; }
+  const groups = [...teams].sort((a, b) => a.id.localeCompare(b.id)).map((t) => {
+    const members = players.filter((p) => p.teamId === t.id);
+    return el('div', { class: 'team-col', style: `--team:${t.color}` }, el('div', { class: 'team-head' }, `${t.icon} ${t.name} · ${members.length}`), ...members.map(chip));
+  });
+  const loose = players.filter((p) => !p.teamId);
+  document.getElementById('players').replaceChildren(el('div', { class: 'team-grid' }, ...groups,
+    loose.length ? el('div', { class: 'team-col' }, el('div', { class: 'team-head' }, `Sans équipe · ${loose.length}`), ...loose.map(chip)) : null));
+}
+
+function teamBoard(teams) {
+  if (!teams) return [];
+  return [el('h3', { class: 'team-board-title' }, '👥 Classement des équipes'), el('ol', { class: 'board team-board' }, ...teams.map((t, i) => el('li', { style: `animation-delay:${i * 90}ms;border-left:10px solid ${t.color}` },
+    el('span', {}, t.rank), el('span', { class: 'name' }, `${t.icon} ${t.name}`, el('small', { style: 'display:block;font-size:14px;opacity:.75' }, `${t.members} joueur(s)${t.best ? ` · meilleur : ${t.best.name}` : ''}`)),
+    el('span', {}, t.score.toLocaleString('fr-FR')))))];
 }
 
 function renderLock(locked) {
@@ -782,7 +804,7 @@ function onMessage(msg) {
     case 'SCOREBOARD':
       if (isNewPhase) { S.scoreboard(); if (blind) player.fadeStop(1.5); }
       document.getElementById('btn-next-q').textContent = q && q.index + 1 >= q.total ? 'Résultats finaux ▶' : (blind ? 'Morceau suivant ▶' : 'Suivant ▶');
-      document.getElementById('board').replaceChildren(...msg.leaderboard.map((p, i) => boardRow(p, i * 90)));
+      document.getElementById('board').replaceChildren(...msg.leaderboard.map((p, i) => boardRow(p, i * 90)), ...teamBoard(msg.teams));
       show('s-board');
       break;
     case 'ENDED': {
@@ -794,7 +816,7 @@ function onMessage(msg) {
       const reportLink = document.getElementById('btn-report');
       reportLink.classList.toggle('hidden', !msg.reportId);
       if (msg.reportId) reportLink.href = `/reports?id=${msg.reportId}`;
-      document.getElementById('end-board').replaceChildren(...lastLeaderboard.slice(3).map((p, i) => boardRow(p, i * 90)));
+      document.getElementById('end-board').replaceChildren(...teamBoard(msg.teams), ...lastLeaderboard.slice(3).map((p, i) => boardRow(p, i * 90)));
       try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
       show('s-end');
       if (isNewPhase) playPodium(lastLeaderboard);

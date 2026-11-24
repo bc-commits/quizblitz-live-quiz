@@ -20,6 +20,10 @@
     .topbar-brand { opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
     .round-tag { margin: 0; text-align: center; font-weight: 800; color: var(--on-bg-muted); }
     .r-track { background: rgba(0,0,0,.25); border-radius: 10px; padding: 8px 14px; font-weight: 800; margin: 0; }
+    .team-badge { color: #fff; border-radius: 999px; padding: 6px 16px; font-weight: 900; margin: 0; }
+    .team-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: min(92vw, 420px); }
+    .team-buttons button { min-height: 56px; box-shadow: none; }
+    .team-buttons button[aria-pressed="true"] { outline: 4px solid #fff; outline-offset: -4px; }
     .paused-banner { background: var(--highlight); color: var(--highlight-ink); text-align: center; font-weight: 900; padding: 6px; }
     #f-medal { position: relative; display: inline-block; }
     #f-medal .medal { position: absolute; right: -14px; bottom: -6px; font-size: 52px; }
@@ -77,6 +81,8 @@
         <div id="lobby-avatar" class="pop"></div>
         <p class="big">Vous êtes dans la partie !</p>
         <p class="muted">Votre pseudo s’affiche sur l’écran principal.</p><p class="muted" id="lobby-title"></p>
+        <p class="team-badge hidden" id="team-badge"></p>
+        <div class="stack" id="team-picker" style="align-items:center"></div>
         <button class="accent" id="btn-edit-avatar" type="button">Changer d’avatar</button>
       </div>
     </section>
@@ -146,6 +152,7 @@
     <section id="s-wait" data-screen class="center hidden">
       <div class="stack" style="align-items:center">
         <p class="big" id="w-rank"></p>
+        <p class="muted" id="w-team" style="font-weight:800"></p>
         <p class="muted" id="w-msg">Regardez l’écran principal</p>
         <div class="spinner" aria-hidden="true"></div>
       </div>
@@ -157,6 +164,7 @@
         <p class="huge" id="f-medal"></p>
         <p class="big" id="f-rank"></p>
         <p class="points-pill" id="f-score"></p>
+        <p class="muted" id="f-team" style="font-weight:800"></p>
         <a class="btn accent" href="/">Rejouer</a>
       </div>
     </section>

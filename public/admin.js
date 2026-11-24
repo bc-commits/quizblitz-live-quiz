@@ -68,12 +68,37 @@ function pickFile(accept, multiple = false) {
   });
 }
 
-async function launchGame(blindTestId) {
-  try {
-    const { pin, hostKey } = await api('/api/games', { blindTestId });
-    try { sessionStorage.setItem(HOST_SESSION_KEY, JSON.stringify({ pin, hostKey })); } catch { /* ignore */ }
-    location.href = `/host?pin=${pin}`;
-  } catch (ex) { toast(ex.message, true); }
+/** Launch dialog: optional team mode, then the host screen opens. */
+function launchGame(blindTestId) {
+  const t = { enabled: false, count: 2, assignment: 'auto', method: '', topN: 3, lockOnStart: true, names: [] };
+  const namesBox = el('div', { class: 'grid4' });
+  const drawNames = () => namesBox.replaceChildren(...Array.from({ length: t.count }, (_, i) => el('input', { maxlength: '24', placeholder: `Équipe ${i + 1} (nom par défaut)`, value: t.names[i] || '', 'aria-label': `Nom de l’équipe ${i + 1}`, oninput: (e) => { t.names[i] = e.target.value; } })));
+  const teamBox = el('div', { class: 'stack hidden' },
+    el('div', { class: 'grid4' },
+      field('Nombre d’équipes', select(['2', '3', '4', '5', '6', '7', '8'].map((n) => [n, n]), '2', (v) => { t.count = Number(v); drawNames(); })),
+      field('Affectation', select([['auto', 'Automatique équilibrée'], ['free', 'Choix libre au lobby'], ['host', 'Par l’animateur']], 'auto', (v) => { t.assignment = v; })),
+      field('Score d’équipe', select([['', 'Recommandé (somme si auto, sinon moyenne)'], ['sum', 'Somme des scores'], ['average', 'Moyenne des membres'], ['top-n', 'Somme des N meilleurs']], '', (v) => { t.method = v; })),
+      field('N (top-n)', el('input', { type: 'number', min: '1', max: '10', value: '3', oninput: (e) => { t.topN = Number(e.target.value); } }))),
+    check('Verrouiller les équipes au lancement', true, (v) => { t.lockOnStart = v; }),
+    namesBox);
+  drawNames();
+  const overlay = el('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Lancer une partie' });
+  const close = () => overlay.remove();
+  overlay.append(el('div', { class: 'card stack modal-card', style: 'width:min(640px,100%)' },
+    el('h2', { style: 'margin:0' }, '▶ Lancer une partie'),
+    check('Mode équipes', false, (v) => { t.enabled = v; teamBox.classList.toggle('hidden', !v); }),
+    teamBox,
+    el('p', { class: 'hint' }, 'L’écran animateur va s’ouvrir : affichez-le sur le vidéoprojecteur. Vous pourrez ensuite associer votre téléphone comme télécommande.'),
+    el('div', { class: 'row' }, el('span', { class: 'grow' }), btn('Annuler', close, 'ghost'), btn('Lancer', async () => {
+      try {
+        const teams = t.enabled ? { ...t, method: t.method || undefined, names: t.names.slice(0, t.count) } : undefined;
+        const { pin, hostKey } = await api('/api/games', { blindTestId, options: { teams } });
+        try { sessionStorage.setItem(HOST_SESSION_KEY, JSON.stringify({ pin, hostKey })); } catch { /* ignore */ }
+        location.href = `/host?pin=${pin}`;
+      } catch (ex) { toast(ex.message, true); }
+    }, 'accent'))));
+  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  document.body.append(overlay);
 }
 
 async function resumeGame(pin) {
@@ -131,6 +156,7 @@ const routes = [
   [/^#\/library\/import$/, 'library-import', () => renderLibrary(libCtx(), 'import')],
   [/^#\/library\/edit\/([\w-]+)$/, 'library', (m) => renderLibrary(libCtx(), 'edit', m[1])],
   [/^#\/audit$/, 'audit', renderAudit],
+  [/^#\/reports\/(\d+)$/, 'history', (m) => renderReport(m[1])],
   [/^#\/settings\/(general|appearance|game)$/, null, (m) => renderSettings(m[1])],
 ];
 
@@ -162,15 +188,26 @@ window.addEventListener('beforeunload', (e) => { if (leaveGuard && leaveGuard())
 
 // ---------------------------------------------------------------- dashboard
 
+let dashboardTimer = 0;
 async function renderDashboard() {
+  clearTimeout(dashboardTimer);
   const d = await api('/api/admin/dashboard');
+  // Light polling (every 8 s) while the dashboard is open; stops as soon as another page opens.
+  dashboardTimer = setTimeout(() => { if ((location.hash || '#/dashboard') === '#/dashboard') renderDashboard().catch(() => {}); }, 8000);
+  const b = d.backend;
+  const mb = (bytes) => `${Math.round(bytes / 1048576).toLocaleString('fr-FR')} Mo`;
+  const disconnected = d.activeGames.reduce((n, g) => n + (g.state === 'ENDED' ? 0 : g.disconnected), 0);
   const s = d.stats;
   const stat = (n, label) => el('div', { class: 'stat' }, el('b', {}, n), el('span', {}, label));
   page('Tableau de bord',
     d.warnings.length ? el('div', { class: 'warnings' }, el('b', {}, '⚠️ Points de configuration à vérifier'), el('ul', {}, ...d.warnings.map((w) => el('li', {}, w)))) : null,
     el('div', { class: 'stats' },
       stat(s.blindTests, 'blind tests actifs'), stat(s.tracks, 'morceaux'), stat(s.activeGames, 'parties en cours'),
-      stat(s.connectedPlayers, 'joueurs connectés'), stat(s.gamesPlayed, 'parties jouées')),
+      stat(s.connectedPlayers, 'joueurs connectés'), stat(disconnected, 'déconnectés (temporaire)'), stat(s.gamesPlayed, 'parties jouées'), stat(s.libraryTracks, 'morceaux en bibliothèque')),
+    el('div', { class: 'card stack', style: 'margin-bottom:16px' }, el('b', {}, '🖥️ Serveur'),
+      el('div', { class: 'meta' }, `En ligne depuis ${Math.round(b.uptime / 60)} min · mémoire ${b.memoryMb} Mo · Node ${b.node} · ${b.media.count} média(s), ${mb(b.media.bytes)}${b.disk ? ` · disque libre ${mb(b.disk.freeBytes)} / ${mb(b.disk.totalBytes)}` : ''}`),
+      d.recentErrors.length ? el('details', {}, el('summary', {}, `⚠️ ${d.recentErrors.length} erreur(s) récente(s)`), el('ul', {}, ...d.recentErrors.map((e) => el('li', {}, `${fmtDate(e.at)} — ${e.message}`)))) : el('span', { class: 'meta' }, 'Aucune erreur récente ✓'),
+      el('span', { class: 'meta' }, 'Actualisation automatique toutes les 8 secondes.')),
     el('div', { class: 'toolbar' },
       el('a', { class: 'btn accent', href: '#/blindtests/new' }, '➕ Créer un blind test'),
       el('a', { class: 'btn ghost', href: '#/blindtests' }, '▶ Lancer une partie'),
@@ -180,7 +217,7 @@ async function renderDashboard() {
     el('h2', { style: 'margin-top:20px' }, 'Historique récent'),
     d.recentGames.length ? el('div', { class: 'list' }, ...d.recentGames.map((g) => el('div', { class: 'item' },
       el('div', { class: 'grow' }, el('div', { class: 'title' }, g.title), el('div', { class: 'meta' }, `${fmtDate(g.endedAt)} · ${g.players} joueur(s) · ${g.completed ? 'terminée' : 'interrompue'}`)),
-      el('a', { class: 'btn ghost small', href: `/reports?id=${g.id}` }, 'Rapport'))))
+      el('a', { class: 'btn ghost small', href: g.kind === 'music-blind-test' ? `#/reports/${g.id}` : `/reports?id=${g.id}` }, 'Rapport'))))
       : el('p', { class: 'muted' }, 'Aucune partie terminée pour le moment.'));
 }
 
@@ -189,7 +226,7 @@ function gamesList(list, refresh) {
   return el('div', { class: 'list' }, ...list.map((g) => el('div', { class: 'item' },
     el('div', { class: 'grow' },
       el('div', { class: 'title' }, `${g.title} `, el('span', { class: 'tag' }, `PIN ${g.pin}`), ' ', el('span', { class: `tag ${g.state === 'ENDED' ? '' : 'ok'}` }, g.paused ? 'Pause' : STATE_LABELS[g.state] || g.state)),
-      el('div', { class: 'meta' }, `${g.connected}/${g.players} joueur(s) connecté(s) · morceau ${Math.min(g.question, g.questions)}/${g.questions} · animateur ${g.hostConnected ? 'connecté' : 'déconnecté'} · créée ${fmtDate(g.createdAt)}`)),
+      el('div', { class: 'meta' }, `${g.connected}/${g.players} joueur(s) connecté(s)${g.answered !== null ? ` · ${g.answered} réponse(s)` : ''}${g.teams ? ` · ${g.teams} équipes` : ''} · morceau ${Math.min(g.question, g.questions)}/${g.questions} · animateur ${g.hostConnected ? 'connecté' : 'déconnecté'} · créée ${fmtDate(g.createdAt)}`)),
     g.state !== 'ENDED' ? btn('Reprendre l’animation', () => resumeGame(g.pin), 'small accent') : null,
     g.state !== 'ENDED' ? btn('Terminer', async () => {
       if (!confirm(`Terminer la partie ${g.pin} ? Le classement actuel deviendra définitif.`)) return;
@@ -358,6 +395,47 @@ async function renderAudit() {
   page('Journal d’audit', el('p', { class: 'hint' }, 'Actions importantes des administrateurs. Aucun mot de passe, cookie, jeton ou contenu de fichier n’y est enregistré. L’adresse IP n’est conservée que pour les échecs de connexion. Conservation : AUDIT_RETENTION_DAYS (180 jours par défaut).'),
     el('div', { class: 'toolbar' }, filter), list, pager);
   load();
+}
+
+// ---------------------------------------------------------------- blind test report
+
+async function renderReport(id) {
+  const r = await api(`/api/admin/reports/${id}`);
+  const pctTxt = (x) => (x === null || x === undefined ? '—' : `${Math.round(x * 100)} %`);
+  const sec = (ms) => (ms === null || ms === undefined ? '—' : `${(ms / 1000).toFixed(1).replace('.', ',')} s`);
+  const h = r.highlights;
+  const fact = (label, value) => el('div', { class: 'stat' }, el('span', {}, label), el('b', { style: 'font-size:18px' }, value || '—'));
+  const table = (head, rows) => el('table', { class: 'report-table' }, el('thead', {}, el('tr', {}, ...head.map((x) => el('th', {}, x)))), el('tbody', {}, ...rows.map((row) => el('tr', {}, ...row.map((c) => el('td', {}, c ?? '—'))))));
+  page(`Rapport : ${r.title}`,
+    el('div', { class: 'toolbar no-print' },
+      btn('🖨 Imprimer', () => window.print(), 'accent small'),
+      el('a', { class: 'btn ghost small', href: `/api/admin/reports/${id}?format=csv` }, '⬇ CSV'),
+      el('a', { class: 'btn ghost small', href: `/api/admin/reports/${id}?format=json` }, '⬇ JSON'),
+      el('a', { class: 'btn ghost small', href: `/reports?id=${id}` }, 'Rapport détaillé par question')),
+    el('p', { class: 'muted' }, `${fmtDate(r.startedAt)} → ${fmtDate(r.endedAt)} · PIN ${r.pin} · ${r.completed ? 'partie terminée' : 'partie interrompue'}`),
+    el('div', { class: 'stats' },
+      fact('Participants', r.summary.participants), fact('Morceaux joués', `${r.summary.tracks}/${r.summary.tracksInBlindTest}`), fact('Réponses', r.summary.totalAnswers),
+      fact('Taux de réponse', pctTxt(r.summary.responseRate)), fact('Bonnes réponses', pctTxt(r.summary.correctRate)), fact('Temps moyen', sec(r.summary.avgResponseMs)),
+      fact('Durée', `${Math.round(r.summary.durationMs / 60000)} min`), fact('Reconnexions', r.summary.reconnections)),
+    el('h2', {}, '✨ Faits marquants'),
+    el('div', { class: 'stats' },
+      fact('Podium', h.podium.map((p) => `${p.rank}. ${p.name}`).join(' · ')),
+      fact('Meilleure série', h.bestStreak && h.bestStreak.bestStreak ? `${h.bestStreak.name} (${h.bestStreak.bestStreak})` : '—'),
+      fact('Réponse juste la plus rapide', h.fastestCorrect ? `${h.fastestCorrect.name} (${sec(h.fastestCorrect.ms)})` : '—'),
+      fact('Plus forte progression', h.biggestProgression ? `${h.biggestProgression.name} (+${h.biggestProgression.progression} places)` : '—'),
+      fact('Joueur le plus régulier', h.mostRegular ? `${h.mostRegular.name} (${h.mostRegular.correct} bonnes réponses)` : '—'),
+      fact('Morceau le mieux reconnu', h.bestTrack ? `${h.bestTrack.title} (${pctTxt(h.bestTrack.recognitionRate)})` : '—'),
+      fact('Morceau le moins reconnu', h.worstTrack ? `${h.worstTrack.title} (${pctTxt(h.worstTrack.recognitionRate)})` : '—'),
+      h.winningTeam ? fact('Équipe gagnante', `${h.winningTeam.icon} ${h.winningTeam.name} (${h.winningTeam.score})`) : null),
+    r.teams ? el('h2', {}, `👥 Équipes (score : ${{ sum: 'somme', average: 'moyenne', 'top-n': 'meilleurs joueurs' }[r.teams.method] || r.teams.method})`) : null,
+    r.teams ? table(['Équipe', 'Membres', 'Score', 'Meilleur joueur'], r.teams.list.map((t) => [`${t.icon} ${t.name}`, t.members, t.score.toLocaleString('fr-FR'), t.best ? `${t.best.name} (${t.best.score})` : '—'])) : null,
+    el('h2', {}, '🏆 Classement'),
+    table(['Rang', 'Joueur', 'Équipe', 'Score', 'Bonnes', 'Répondu', 'Série max', 'Temps moyen', 'Progression'],
+      r.players.map((p) => [p.rank, p.name, p.team || '—', p.score.toLocaleString('fr-FR'), p.correct, p.answered, p.bestStreak, sec(p.avgMs), p.progression > 0 ? `+${p.progression}` : String(p.progression)])),
+    el('h2', {}, '🎵 Par morceau'),
+    table(['#', 'Morceau', 'Manche', 'Reconnu', 'Artiste', 'Titre', 'Temps moyen', 'Sans réponse', 'Difficulté', 'Mauvaises réponses fréquentes'],
+      r.tracks.map((t) => [t.index + 1, `${t.title}${t.artist ? ` — ${t.artist}` : ''}${t.multiplier > 1 ? ` (x${t.multiplier})` : ''}`, t.roundTitle, pctTxt(t.recognitionRate), pctTxt(t.artistRate), pctTxt(t.titleRate), sec(t.avgMs), t.noAnswer, t.difficulty || '—',
+        Object.values(t.wrongAnswers).flat().map((w) => `${w.text} (${w.count})`).join(', ') || '—'])));
 }
 
 // ---------------------------------------------------------------- settings

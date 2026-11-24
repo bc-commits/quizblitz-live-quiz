@@ -83,6 +83,7 @@ $('name-form').addEventListener('submit', async (e) => {
 function connect() {
   $('t-pin').textContent = session.pin;
   $('f-name').textContent = session.name;
+  $('team-badge').classList.add('hidden');
   $('topbar').classList.remove('hidden');
   $('footer').classList.remove('hidden');
   if (!$('f-mute').firstChild) $('f-mute').replaceChildren(Sound.muteButton());
@@ -177,6 +178,21 @@ $('btn-avatar-done').addEventListener('click', async () => {
   }
 });
 
+/** Team badge, and the team picker when the host lets players choose. */
+function renderTeamPicker(msg) {
+  const badge = $('team-badge');
+  badge.textContent = msg.team ? `${msg.team.icon} Équipe ${msg.team.name}` : '';
+  badge.style.background = msg.team ? msg.team.color : '';
+  badge.classList.toggle('hidden', !msg.team);
+  const box = $('team-picker');
+  if (!msg.teams || !msg.canPickTeam) { box.replaceChildren(); return; }
+  box.replaceChildren(el('p', { class: 'muted', style: 'margin:0' }, msg.team ? 'Changer d’équipe :' : 'Choisissez votre équipe :'),
+    el('div', { class: 'team-buttons' }, ...msg.teams.map((t) => el('button', {
+      type: 'button', style: `background:${t.color};color:#fff`, 'aria-pressed': String(msg.team?.id === t.id),
+      onclick: async () => { try { await api(`/api/games/${session.pin}/team`, { token: session.token, teamId: t.id }); } catch (ex) { alert(ex.message); } },
+    }, `${t.icon} ${t.name}`))));
+}
+
 function setScore(score) {
   if (typeof score === 'number') $('f-total').textContent = score.toLocaleString('fr-FR');
 }
@@ -198,6 +214,7 @@ function onMessage(msg) {
   switch (msg.state) {
     case 'LOBBY':
       $('lobby-title').textContent = msg.title || '';
+      renderTeamPicker(msg);
       show('s-lobby');
       break;
     case 'GET_READY':
@@ -220,6 +237,7 @@ function onMessage(msg) {
       break;
     case 'SCOREBOARD':
       $('w-rank').textContent = `Vous êtes à la ${place(msg.rank)}${moveText(msg.prevRank, msg.rank)}`;
+      $('w-team').textContent = msg.teamRank && msg.team ? `${msg.team.icon} ${msg.team.name} : ${place(msg.teamRank.rank)} sur ${msg.teamRank.of} équipes` : '';
       $('w-msg').textContent = 'Regardez l’écran principal';
       show('s-wait');
       break;
@@ -228,6 +246,7 @@ function onMessage(msg) {
         el('span', { class: 'medal' }, ['🥇', '🥈', '🥉'][msg.rank - 1] || '🎉'));
       $('f-rank').textContent = `${ordinal(msg.rank)} sur ${msg.total}`;
       $('f-score').textContent = `${msg.score.toLocaleString('fr-FR')} points`;
+      $('f-team').textContent = msg.teamRank && msg.team ? `${msg.team.icon} ${msg.team.name} : ${place(msg.teamRank.rank)} sur ${msg.teamRank.of} équipes (${msg.teamRank.score.toLocaleString('fr-FR')} pts)` : '';
       try { sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
       show('s-final');
       break;
@@ -336,7 +355,7 @@ function partsForm(q, container) {
       }, el('span', { html: SHAPES[i] }), el('span', {}, c)));
       return el('div', { class: 'part' }, el('h3', {}, p.label), el('div', { class: 'part-choices' }, ...buttons));
     }
-    const field = el('input', { type: 'text', maxlength: String(p.maxLength || 80), 'aria-label': p.label, placeholder: `${p.label} (facultatif si vous ne savez pas)`,
+    const field = el('input', { type: 'text', maxlength: String(p.maxLength || 80), 'aria-label': p.label, placeholder: `${p.label} (facultatif)`,
       autocomplete: 'off', autocapitalize: 'words', enterkeyhint: 'send',
       oninput: (e) => { if (e.target.value.trim()) values[p.key] = e.target.value; else delete values[p.key]; refresh(); } });
     return el('div', { class: 'part' }, el('h3', {}, p.label), field);

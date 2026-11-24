@@ -22,6 +22,7 @@ const Scoring = require('./lib/scoring');
 const Answers = require('./lib/answers');
 const { serializeGame, restoreGame } = require('./lib/gamestore');
 const { createAdminExtra } = require('./lib/admin-extra');
+const Teams = require('./lib/teams');
 const { isOffensive, randomName, isGeneratedName } = require('./filter');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -228,7 +229,7 @@ function restoreGames() {
 
 function playerList(g) {
   return [...g.players.values()].map((p) => ({
-    id: p.id, name: p.name, score: p.score, avatar: p.avatar, connected: p.streams.size > 0,
+    id: p.id, name: p.name, score: p.score, avatar: p.avatar, connected: p.streams.size > 0, teamId: p.teamId || null,
   }));
 }
 
@@ -317,7 +318,7 @@ const flowView = (g) => ({ mode: effectiveFlow(g), override: g.flowOverride || n
 function hostSnapshot(g) {
   const base = { type: 'STATE', state: g.state, pin: g.pin, title: g.quiz.title, kind: g.quiz.kind || 'quiz', players: playerList(g),
     connectedCount: connectedCount(g), locked: g.locked, options: g.options, paused: pausedView(g), blind: blindHostView(g),
-    total: g.quiz.questions.length, flow: flowView(g) };
+    total: g.quiz.questions.length, flow: flowView(g), teams: Teams.standings(g), teamOptions: g.teamOptions || null };
   if (g.state === S.GET_READY) return { ...base, question: publicQuestion(g), startsAt: g.questionStartsAt, readyMs: g.readyMs };
   if (g.state === S.QUESTION) {
     return { ...base, question: publicQuestion(g), endsAt: g.endsAt, openedAt: g.questionOpenedAt, answeredCount: g.answers.size };
@@ -332,15 +333,18 @@ function hostSnapshot(g) {
 // recovery snapshot a real-time quiz client restores from after a reconnect.
 function playerSnapshot(g, p) {
   const base = { type: 'STATE', state: g.state, pin: g.pin, title: g.quiz.title, kind: g.quiz.kind || 'quiz', name: p.name,
-    score: p.score, avatar: p.avatar, paused: pausedView(g), blind: blindPlayerView(g) };
+    score: p.score, avatar: p.avatar, paused: pausedView(g), blind: blindPlayerView(g), team: Teams.teamOf(g, p),
+    teams: g.teams && g.state === S.LOBBY ? g.teams : undefined,
+    canPickTeam: !!(g.teams && g.teamOptions.assignment === 'free' && Teams.canChangeTeam(g, g.state !== S.LOBBY)) };
   if (g.state === S.GET_READY) return { ...base, question: publicQuestion(g), startsAt: g.questionStartsAt };
   if (g.state === S.QUESTION) {
     const answered = g.answers.has(p.id);
     return { ...base, question: publicQuestion(g), endsAt: g.endsAt, answered, canChange: !!g.quiz.settings?.allowAnswerChange };
   }
   if (g.state === S.REVEAL) return { ...base, result: p.lastResult || null, question: publicQuestion(g) };
-  if (g.state === S.SCOREBOARD) return { ...base, rank: rankOf(g, p), total: g.players.size, prevRank: p.prevRank ?? null };
-  if (g.state === S.ENDED) return { ...base, rank: rankOf(g, p), total: g.players.size };
+  const teamRank = () => { const st = Teams.standings(g); const t = st && st.find((x) => x.id === p.teamId); return t ? { rank: t.rank, of: st.length, score: t.score } : null; };
+  if (g.state === S.SCOREBOARD) return { ...base, rank: rankOf(g, p), total: g.players.size, prevRank: p.prevRank ?? null, teamRank: teamRank() };
+  if (g.state === S.ENDED) return { ...base, rank: rankOf(g, p), total: g.players.size, teamRank: teamRank() };
   return base;
 }
 
@@ -428,6 +432,7 @@ function endQuestion(g) {
       }
     }
     p.score += points;
+    p.bestStreak = Math.max(p.bestStreak || 0, p.streak);
     p.prevRank = before.get(p.id);
     p.lastResult = { answered: !!a, scored, isCorrect: scored && verdict.correct, points, streak: p.streak,
       responseMs: a ? a.responseMs : null,
@@ -480,7 +485,7 @@ function finishGame(g, completed) {
   persistNow(g);
 }
 
-function createGame({ quiz, options, ownerId }) {
+function createGame({ quiz, options, ownerId, teams }) {
   if (games.size >= MAX_LIVE_GAMES) throw httpError(503, 'Trop de parties en cours sur ce serveur. Réessayez plus tard.');
   const now = Date.now();
   const g = {
@@ -488,6 +493,7 @@ function createGame({ quiz, options, ownerId }) {
     state: S.LOBBY, qIndex: 0, players: new Map(), hostStreams: new Set(), answers: new Map(),
     timer: null, persistTimer: null, lastActivity: now, createdAt: now, history: [], startedAt: null, paused: null,
     scoring: Scoring.normaliseScoring(settings.scoring), maxPlayers: settings.maxPlayers,
+    teams: teams ? teams.teams : null, teamOptions: teams ? teams.options : null,
   };
   games.set(g.pin, g);
   persistNow(g);
@@ -763,7 +769,8 @@ async function removeMediaIfUnused(urls) {
 function activeGamesSummary() {
   return [...games.values()].map((g) => ({
     pin: g.pin, title: g.quiz.title, kind: g.quiz.kind || 'quiz', state: g.state, paused: !!g.paused,
-    players: g.players.size, connected: connectedCount(g), question: g.qIndex + 1, questions: g.quiz.questions.length,
+    players: g.players.size, connected: connectedCount(g), disconnected: g.players.size - connectedCount(g),
+    answered: g.state === S.QUESTION ? g.answers.size : null, teams: g.teams ? g.teams.length : 0, question: g.qIndex + 1, questions: g.quiz.questions.length,
     createdAt: g.createdAt, lastActivity: g.lastActivity, hostConnected: g.hostStreams.size > 0,
   })).sort((a, b) => b.lastActivity - a.lastActivity);
 }
@@ -815,7 +822,11 @@ async function handleAdmin(req, res, url, parts) {
   // --- dashboard
   if (action === 'dashboard' && req.method === 'GET') {
     const active = activeGamesSummary();
+    let disk = null;
+    try { const st = fs.statfsSync(DATA_DIR); disk = { freeBytes: st.bavail * st.bsize, totalBytes: st.blocks * st.bsize }; } catch { /* not available on this platform */ }
     return sendJson(res, 200, {
+      backend: { uptime: Math.round(process.uptime()), memoryMb: Math.round(process.memoryUsage().rss / 1048576), node: process.version, disk, media: store.mediaTotals(db) },
+      recentErrors,
       stats: { ...store.stats(db), activeGames: active.filter((g) => g.state !== S.ENDED).length,
         connectedPlayers: active.reduce((n, g) => n + (g.state === S.ENDED ? 0 : g.connected), 0) },
       activeGames: active, recentGames: store.recentGames(db), warnings: configWarnings(),
@@ -1039,6 +1050,7 @@ function hostActionHandler(g, body) {
       g.qIndex = 0;
       g.startedAt = now;
       if (g.options.lockOnStart) g.locked = true;
+      Teams.fillUnassigned(g);
       startGetReady(g);
       break;
     case 'skip': case 'close': // close answers now and reveal
@@ -1088,6 +1100,37 @@ function hostActionHandler(g, body) {
       if (g.state === S.QUESTION && !g.paused && g.answers.size >= g.players.size && g.players.size) endQuestion(g);
       else broadcastState(g);
       break;
+    case 'assign-team': {
+      const p = g.players.get(String(body.playerId));
+      if (!g.teams || !p) throw httpError(400, 'Équipe ou joueur introuvable');
+      if (!Teams.canChangeTeam(g, g.state !== S.LOBBY)) throw httpError(409, 'Les équipes sont verrouillées');
+      if (!g.teams.some((t) => t.id === body.teamId)) throw httpError(400, 'Équipe inconnue');
+      p.teamId = body.teamId;
+      broadcastState(g);
+      break;
+    }
+    case 'accept-answer': {
+      // Manual validation of a typed answer just outside the tolerance. Adds the points of
+      // that part (base points x multiplier, no speed bonus); the streak is not changed.
+      if (g.state !== S.REVEAL) throw httpError(409, 'Validation possible uniquement pendant la révélation');
+      const p = g.players.get(String(body.playerId));
+      const q = currentQ(g);
+      const part = p && p.lastResult && (p.lastResult.parts || []).find((x) => x.key === body.part);
+      if (!p || !q || q.type !== 'blind' || !part || part.correct || !part.answered) throw httpError(400, 'Réponse introuvable ou déjà juste');
+      const cfg = q.scoring || Scoring.resolveScoring(null);
+      const base = q.parts.length > 1 ? (part.key === 'artist' ? cfg.artistPoints : cfg.titlePoints) : cfg.correctPoints;
+      const delta = Math.round(base * (q.multiplier || 1));
+      part.correct = true;
+      part.ambiguous = false;
+      p.score += delta;
+      const allRight = p.lastResult.parts.every((x) => x.correct);
+      p.lastResult = { ...p.lastResult, points: p.lastResult.points + delta, totalScore: p.score, isCorrect: allRight, partial: !allRight, manuallyAccepted: true };
+      const rec = g.history[g.qIndex] && g.history[g.qIndex][p.id];
+      if (rec) { rec.points += delta; rec.correct = allRight; if (rec.parts) rec.parts = rec.parts.map((x) => (x.key === part.key ? { ...x, correct: true } : x)); }
+      auditLog('animateur', 'game.accept_answer', 'game', g.pin, `${p.name} : « ${String(part.yourAnswer).slice(0, 60)} » accepté (+${delta})`);
+      broadcastState(g);
+      break;
+    }
     case 'kick': {
       const p = g.players.get(String(body.playerId));
       if (p) {
@@ -1172,7 +1215,7 @@ async function handleApi(req, res, url) {
       if (!ALLOW_PUBLIC_QUIZ_HOSTING && !admin && !user) return sendJson(res, 401, { error: 'Connexion requise pour créer une partie.', code: 'SIGN_IN' });
       quiz = Q.validateQuiz(body.quiz);
     }
-    const g = createGame({ quiz, options, ownerId });
+    const g = createGame({ quiz, options, ownerId, teams: Teams.normaliseTeamOptions(o.teams) });
     return sendJson(res, 201, { pin: g.pin, hostKey: g.hostKey });
   }
 
@@ -1274,9 +1317,24 @@ async function handleApi(req, res, url) {
       avatar: pickAvatar(g), streams: new Set(), lastResult: null, prevRank: null,
     };
     g.players.set(p.id, p);
+    // Automatic assignment, or a late joiner (game already started): balanced team.
+    if (g.teams && (g.teamOptions.assignment === 'auto' || g.state !== S.LOBBY)) p.teamId = Teams.smallestTeam(g);
     toHosts(g, { type: 'PLAYERS', players: playerList(g), connectedCount: connectedCount(g) });
-    persist(g);
-    return sendJson(res, 201, { playerId: p.id, token: p.token, name: p.name, avatar: p.avatar });
+    if (g.teams) broadcastState(g); else persist(g);
+    return sendJson(res, 201, { playerId: p.id, token: p.token, name: p.name, avatar: p.avatar, team: Teams.teamOf(g, p) });
+  }
+
+  // Player picks a team (free choice mode).
+  if (req.method === 'POST' && action === 'team') {
+    const body = await readBody(req, 4096);
+    const p = findPlayer(g, body.token);
+    if (!p) return sendJson(res, 404, { error: 'Joueur introuvable' });
+    if (!g.teams || g.teamOptions.assignment !== 'free') return sendJson(res, 409, { error: 'Le choix d’équipe n’est pas ouvert dans cette partie' });
+    if (!Teams.canChangeTeam(g, g.state !== S.LOBBY)) return sendJson(res, 409, { error: 'Les équipes sont verrouillées', code: 'TEAMS_LOCKED' });
+    if (!g.teams.some((t) => t.id === body.teamId)) return sendJson(res, 400, { error: 'Équipe inconnue' });
+    p.teamId = body.teamId;
+    broadcastState(g);
+    return sendJson(res, 200, { team: Teams.teamOf(g, p) });
   }
 
   // Player changes their character / accessory (shown live on the host screen).
@@ -1302,6 +1360,8 @@ async function handleApi(req, res, url) {
     const p = findPlayer(g, url.searchParams.get('token'));
     if (!p) return sendJson(res, 404, { error: 'Joueur introuvable', code: 'PLAYER_NOT_FOUND' });
     const s = openStream(req, res);
+    if (p.connectedOnce && !p.streams.size) p.reconnects = (p.reconnects || 0) + 1;
+    p.connectedOnce = true;
     p.streams.add(s);
     p.lastSeen = Date.now();
     push(s, playerSnapshot(g, p));

@@ -115,3 +115,11 @@ body.admin { background: var(--bg); }
 .report-table th { background: var(--surface-2); font-weight: 900; }
 .report-table tr.st-error td { background: #fff1f1; }
 .report-table tr.st-duplicate td { background: #fff8e6; }
+
+@media print {
+  body.admin { background: #fff; color: #000; }
+  .admin-nav, .nav-toggle, .no-print, .toast { display: none !important; }
+  .admin-shell { display: block; }
+  .stat, .report-table { box-shadow: none; border: 1px solid #ccc; }
+  .report-table { page-break-inside: auto; }
+}

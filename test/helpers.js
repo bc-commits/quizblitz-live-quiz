@@ -38,7 +38,7 @@ async function startServer({ dataDir = tempDir(), env = {} } = {}) {
   });
   child.removeAllListeners('exit');
   const stop = () => new Promise((resolve) => {
-    if (child.exitCode !== null) return resolve();
+    if (child.exitCode !== null || child.signalCode !== null) return resolve(); // already stopped
     child.once('exit', resolve);
     child.kill(process.platform === 'win32' ? undefined : 'SIGTERM');
   });

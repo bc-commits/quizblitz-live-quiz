@@ -34,7 +34,8 @@
 
     /* ---------- full-screen game layout (question / reveal) ---------- */
     .game-screen { display: flex; flex-direction: column; height: 100vh; height: 100dvh; padding: 16px 16px 0; gap: 14px; }
-    .game-screen > .answers { flex: none; }
+    .game-screen > .answers { flex: none; max-height: 52vh; overflow-y: auto; }
+    .game-screen > .qmid { min-height: 150px; }
     .time-bar { height: 8px; border-radius: 99px; background: rgba(255,255,255,.15); overflow: hidden; flex: none; }
     .time-bar > div { height: 100%; background: var(--a2); width: 100%; transform-origin: left; }
     .question-text { background: var(--surface); color: var(--text); border-radius: var(--radius); padding: 18px 24px; font-size: clamp(22px, 3.4vw, 42px); font-weight: 900; text-align: center; box-shadow: var(--shadow); margin: 0; flex: none; }
@@ -116,8 +117,13 @@
     .host-part-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
     .host-part-choices .tile { min-height: 54px; font-size: clamp(15px, 1.6vw, 22px); }
     .mini-bars { display: flex; gap: 6px; align-items: flex-end; height: 40px; }
-    .mini-bars span { flex: 1; min-height: 3px; padding: 0; border-radius: 4px 4px 0 0; }
+    .mini-bars span.tile, .answers.host .mini-bars .tile { flex: 1; min-height: 3px; padding: 0; border-radius: 4px 4px 0 0; box-shadow: none; }
     #c-auto:empty { display: none; }
+    .team-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; width: 100%; }
+    .team-col { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; background: rgba(0,0,0,.2); border-top: 6px solid var(--team, #888); border-radius: 12px; padding: 10px; }
+    .team-head { font-weight: 900; font-size: 20px; }
+    .team-select { width: auto; padding: 2px 4px; font-size: 13px; }
+    .team-board-title { text-align: center; margin: 18px 0 0; }
     .sound-gate { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(0,0,0,.6); }
     @media (max-width: 760px) {
       .lobby { grid-template-columns: 1fr; justify-items: center; text-align: center; }
