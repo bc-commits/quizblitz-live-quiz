@@ -101,3 +101,7 @@ body.admin { background: var(--bg); }
   .appearance { grid-template-columns: 1fr; }
   .preview { position: static; }
 }
+.round-settings summary { cursor: pointer; font-weight: 800; color: var(--text-muted); }
+.answer-block { border: 2px dashed var(--surface-2); border-radius: 10px; padding: 10px; color: var(--text); }
+.answer-block input.dup { border-color: var(--bad); background: #fff1f1; }
+.choice-line button { padding: 6px 9px; font-size: 13px; box-shadow: none; flex: none; }

@@ -13,6 +13,10 @@
 //   openended  longer free text, shown as a list, no points
 
 const { cleanText } = require('./filter');
+const { matchFreeText } = require('./lib/answers');
+
+// "blind" (music blind test) questions are built by lib/blindtest.js, never typed in the
+// classic editor: they carry answer parts, each multiple choice or free text.
 
 const TYPES = ['quiz', 'truefalse', 'typeanswer', 'slider', 'puzzle', 'droppin', 'poll', 'wordcloud', 'openended'];
 const UNSCORED = new Set(['poll', 'wordcloud', 'openended']);
@@ -103,6 +107,15 @@ function prepareForGame(quiz, opts) {
       const order = shuffle(q.choices.map((_, i) => i));
       return { ...q, choices: order.map((i) => q.choices[i]), correct: q.correct.map((c) => order.indexOf(c)) };
     }
+    if (q.type === 'blind' && opts.shuffleAnswers) {
+      const parts = q.parts.map((p) => {
+        if (p.mode !== 'mc') return p;
+        const order = shuffle(p.choices.map((_, i) => i));
+        return { ...p, choices: order.map((i) => p.choices[i]), correct: p.correct.map((c) => order.indexOf(c)) };
+      });
+      const single = parts.length === 1 && parts[0].mode === 'mc' ? parts[0] : null;
+      return { ...q, parts, ...(single ? { choices: single.choices, correct: single.correct } : {}) };
+    }
     if (q.type === 'puzzle') {
       let order = shuffle(q.items.map((_, i) => i));
       if (order.every((v, i) => v === i)) order = [...order.slice(1), order[0]]; // never start solved
@@ -121,6 +134,11 @@ function publicView(q, index, total, showOnDevices = true) {
   if (q.type === 'puzzle') v.items = q.displayOrder.map((id) => ({ id, text: q.items[id] }));
   if (q.maxLength) v.maxLength = q.maxLength;
   if (q.type === 'typeanswer') v.maxLength = 20;
+  if (q.type === 'blind') {
+    // Choices and modes only: never the correct index, the expected text or the aliases.
+    v.parts = q.parts.map((p) => (p.mode === 'mc' ? { key: p.key, label: p.label, mode: 'mc', choices: p.choices } : { key: p.key, label: p.label, mode: 'text', maxLength: p.maxLength || 80 }));
+    v.multiplier = q.multiplier || 1;
+  }
   return v;
 }
 
@@ -155,8 +173,41 @@ function parseAnswer(q, body) {
       if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) throw new Error('Invalid pin');
       return { x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 };
     }
+    case 'blind': {
+      // { main: 2 } / { artist: 1, title: 'Je te donne' } ; a bare number is accepted for single choice.
+      const input = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : { [q.parts[0].key]: raw };
+      const out = {};
+      for (const p of q.parts) {
+        const v = input[p.key];
+        if (v === undefined || v === null || v === '') continue;
+        if (p.mode === 'mc') {
+          const c = Number(v);
+          if (!Number.isInteger(c) || c < 0 || c >= p.choices.length) throw new Error('Invalid answer');
+          out[p.key] = c;
+        } else {
+          const t = str(v, p.maxLength || 80);
+          if (t) out[p.key] = t;
+        }
+      }
+      if (!Object.keys(out).length) throw new Error('Choisissez au moins une réponse');
+      return out;
+    }
     default: throw new Error('Invalid answer');
   }
+}
+
+/** Judges each part of a blind answer: [{ key, correct, rule?, ambiguous? }] (only answered parts). */
+function judgeParts(q, a) {
+  const out = [];
+  for (const p of q.parts) {
+    if (!a || a[p.key] === undefined) continue;
+    if (p.mode === 'mc') out.push({ key: p.key, correct: p.correct.includes(a[p.key]) });
+    else {
+      const m = matchFreeText(a[p.key], p);
+      out.push({ key: p.key, correct: m.accepted, rule: m.rule, ambiguous: !m.accepted && m.ambiguous });
+    }
+  }
+  return out;
 }
 
 /** Correctness and a 0..1 accuracy factor (slider answers inside the margin score less the further off they are). */
@@ -174,6 +225,10 @@ function judge(q, a) {
       const d = Math.hypot(a.x - q.target.x, a.y - q.target.y);
       return { correct: d <= q.target.r, factor: 1 };
     }
+    case 'blind': {
+      const parts = judgeParts(q, a);
+      return { correct: parts.length === q.parts.length && parts.every((x) => x.correct), factor: 1, parts };
+    }
     default: return { correct: false, factor: 0 }; // unscored types
   }
 }
@@ -184,6 +239,29 @@ const multiplier = (q) => POINTS[q.points] ?? 1;
 /** Summary shown on the host's reveal screen (and to phones where useful). */
 function revealSummary(q, answers /* array of parsed answers */, filter = cleanText) {
   const base = { type: q.type, answeredCount: answers.length, scored: isScored(q) };
+  if (q.type === 'blind') {
+    const parts = q.parts.map((p) => {
+      const given = answers.map((a) => a && a[p.key]).filter((v) => v !== undefined);
+      if (p.mode === 'mc') {
+        const counts = p.choices.map(() => 0);
+        given.forEach((c) => { counts[c]++; });
+        return { key: p.key, label: p.label, mode: 'mc', choices: p.choices, counts, correct: p.correct, answered: given.length, correctCount: given.filter((c) => p.correct.includes(c)).length };
+      }
+      const map = new Map();
+      for (const t of given) {
+        const m = matchFreeText(t, p);
+        const key = m.normalized;
+        const e = map.get(key) || { text: t, count: 0, correct: m.accepted };
+        e.count++;
+        map.set(key, e);
+      }
+      const responses = [...map.values()].map((e) => ({ ...e, text: filter(e.text) })).filter((e) => e.text).sort((x, y) => y.count - x.count).slice(0, 20);
+      return { key: p.key, label: p.label, mode: 'text', answer: p.answer, responses, answered: given.length, correctCount: [...map.values()].filter((e) => e.correct).reduce((n, e) => n + e.count, 0) };
+    });
+    // `counts`/`correct` kept for single multiple choice so older screens and reports still work.
+    const single = parts.length === 1 && parts[0].mode === 'mc' ? parts[0] : null;
+    return { ...base, parts, ...(single ? { counts: single.counts, correct: single.correct } : {}) };
+  }
   if (q.choices) {
     const counts = q.choices.map(() => 0);
     answers.forEach((a) => { counts[a]++; });
@@ -219,6 +297,11 @@ function revealSummary(q, answers /* array of parsed answers */, filter = cleanT
 /** Human-readable form of an answer for reports and CSV. */
 function describeAnswer(q, a) {
   if (a === null || a === undefined) return '';
+  if (q.type === 'blind') {
+    if (typeof a !== 'object') return q.parts[0].mode === 'mc' ? (q.parts[0].choices[a] ?? '') : String(a);
+    return q.parts.filter((p) => a[p.key] !== undefined)
+      .map((p) => `${q.parts.length > 1 ? `${p.label} : ` : ''}${p.mode === 'mc' ? p.choices[a[p.key]] ?? '' : a[p.key]}`).join(' · ');
+  }
   if (q.choices) return q.choices[a] ?? '';
   if (q.type === 'puzzle') return a.map((id) => q.items[id]).join(' → ');
   if (q.type === 'droppin') return `(${Math.round(a.x * 100)}%, ${Math.round(a.y * 100)}%)`;
@@ -227,6 +310,9 @@ function describeAnswer(q, a) {
 }
 
 function describeCorrect(q) {
+  if (q.type === 'blind') {
+    return q.parts.map((p) => `${q.parts.length > 1 ? `${p.label} : ` : ''}${p.mode === 'mc' ? p.correct.map((c) => p.choices[c]).join(' / ') : p.answer}`).join(' · ');
+  }
   switch (q.type) {
     case 'quiz': case 'truefalse': return q.correct.map((c) => q.choices[c]).join(' / ');
     case 'typeanswer': return q.accepted.join(' / ');
@@ -238,6 +324,6 @@ function describeCorrect(q) {
 }
 
 module.exports = {
-  TYPES, validateQuiz, prepareForGame, publicView, parseAnswer, judge, isScored, multiplier,
+  TYPES, validateQuiz, prepareForGame, publicView, parseAnswer, judge, judgeParts, isScored, multiplier,
   revealSummary, describeAnswer, describeCorrect, canon, shuffle,
 };

@@ -57,7 +57,7 @@ test('blind test: detects missing title, wrong answer, duplicates and bad URLs',
   bad.rounds[0].tracks[1].choices = ['A', 'a', 'B', 'C'];
   bad.rounds[0].tracks[1].correctAnswer = 'A';
   bad.rounds[1].tracks[0].audioUrl = 'javascript:alert(1)';
-  bad.rounds[1].tracks[0].choices = ['x', 'y', 'z'];
+  bad.rounds[1].tracks[0].choices = ['x'];
   const { errors } = BT.validateBlindTest(bad);
   const paths = errors.map((e) => e.path);
   assert.ok(paths.includes('title'));
@@ -78,8 +78,9 @@ test('blind test: converted questions carry the answer only in the reveal block'
   assert.equal(quiz.kind, 'music-blind-test');
   assert.equal(quiz.questions.length, 3);
   const q = quiz.questions[0];
-  assert.equal(q.type, 'quiz');
+  assert.equal(q.type, 'blind');
   assert.equal(q.choices[q.correct[0]], 'Les Synthés Rêveurs');
+  assert.equal(q.parts[0].mode, 'mc');
   assert.equal(q.blind.reveal.title, 'Arpèges du dimanche');
   assert.equal(q.text, 'Qui interprète ce morceau ?');
   assert.equal(quiz.questions[2].text, 'Quel est le titre de ce morceau ?');
@@ -88,6 +89,7 @@ test('blind test: converted questions carry the answer only in the reveal block'
   const pub = Q.publicView(q, 0, 3, true);
   assert.equal(pub.blind, undefined);
   assert.equal(pub.correct, undefined);
+  assert.ok(pub.parts.every((p) => p.correct === undefined && p.answer === undefined && p.aliases === undefined));
 });
 
 test('blind test: generates ids and keeps ids unique', () => {

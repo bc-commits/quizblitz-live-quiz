@@ -111,6 +111,13 @@
     .round-label { text-align: center; font-weight: 900; color: var(--on-bg-muted); font-size: clamp(16px, 2vw, 24px); margin: 0; }
     .blind-visual { display: flex; flex-direction: column; align-items: center; gap: 14px; }
     .blind-visual .note { font-size: clamp(60px, 9vw, 120px); line-height: 1; animation: bob 2.4s ease-in-out infinite; }
+    .host-part { display: grid; gap: 10px; text-align: left; }
+    .host-part-label { font-size: .8em; opacity: .85; }
+    .host-part-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+    .host-part-choices .tile { min-height: 54px; font-size: clamp(15px, 1.6vw, 22px); }
+    .mini-bars { display: flex; gap: 6px; align-items: flex-end; height: 40px; }
+    .mini-bars span { flex: 1; min-height: 3px; padding: 0; border-radius: 4px 4px 0 0; }
+    #c-auto:empty { display: none; }
     .sound-gate { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(0,0,0,.6); }
     @media (max-width: 760px) {
       .lobby { grid-template-columns: 1fr; justify-items: center; text-align: center; }
@@ -265,6 +272,9 @@
   <!-- Host control bar (shown during the game) -->
   <div class="ctrl hidden" id="ctrl" role="toolbar" aria-label="Commandes de l’animateur">
     <button class="ctrl-toggle ghost" id="ctrl-toggle" type="button" title="Réduire / afficher les commandes" aria-label="Réduire les commandes">☰</button>
+    <label class="row" style="gap:4px" title="Enchaînement des phases">⏩ <select id="c-flow" aria-label="Enchaînement" style="width:auto;padding:4px 6px;font-size:13px">
+      <option value="">Selon le blind test</option><option value="manual">Manuel</option><option value="semi-auto">Semi-automatique</option><option value="automatic">Automatique</option></select></label>
+    <span id="c-auto" class="status-pill" aria-live="polite"></span>
     <span class="status-pill" id="c-state">Lobby</span>
     <span id="c-players" title="Joueurs connectés / inscrits">👥 0/0</span>
     <span id="c-answers" title="Réponses reçues">✉ 0</span>

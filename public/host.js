@@ -368,8 +368,21 @@ function renderCtrl(msg) {
   $('c-restart').disabled = !pausable;
   $('c-close').disabled = !pausable;
   $('c-stop').classList.toggle('hidden', !isBlindGame);
+  const autoPhase = (msg.state === 'REVEAL' || msg.state === 'SCOREBOARD') && (msg.flow?.autoAt || msg.paused);
+  if (autoPhase) { $('c-pause').disabled = false; }
+  $('c-flow').value = msg.flow?.override || '';
+  $('c-flow').parentElement.classList.toggle('hidden', !isBlindGame);
+  $('c-flow').options[0].textContent = `Selon le blind test (${{ manual: 'manuel', 'semi-auto': 'semi-auto', automatic: 'auto' }[currentQuestionFlow(msg)] || 'manuel'})`;
+  clearInterval(renderCtrl.autoTimer);
+  const autoAt = msg.flow?.autoAt;
+  const tickAuto = () => { const left = Math.ceil((autoAt - serverTime()) / 1000); $('c-auto').textContent = autoAt && left > 0 ? `⏭ suite auto dans ${left} s` : ''; };
+  tickAuto();
+  if (autoAt) renderCtrl.autoTimer = setInterval(tickAuto, 500);
   $('c-volume').parentElement.classList.toggle('hidden', !isBlindGame);
 }
+
+/** Flow mode from the blind test itself (ignoring the host's override). */
+const currentQuestionFlow = (msg) => (msg.flow?.override ? null : msg.flow?.mode) || 'manual';
 
 function moveBadge(p) {
   if (!p.prevRank || p.prevRank === p.rank) return el('span', { class: 'move' }, '•');
@@ -488,6 +501,11 @@ const prompt = (text) => el('div', { class: 'prompt-box' }, text);
 function questionBody(q) {
   switch (q.type) {
     case 'quiz': case 'truefalse': case 'poll': return choiceTiles(q);
+    case 'blind':
+      if (q.choices) return choiceTiles(q);
+      return q.parts.map((p) => el('div', { class: 'prompt-box host-part' }, el('div', { class: 'host-part-label' }, p.label),
+        p.mode === 'mc' ? el('div', { class: 'host-part-choices' }, ...p.choices.map((c, i) => el('span', { class: `tile c${i}` }, el('span', { html: SHAPES[i] }), el('span', {}, c))))
+          : el('div', {}, '✍️ Saisie libre sur votre téléphone')));
     case 'typeanswer': return [prompt('⌨️ Saisissez votre réponse sur votre téléphone')];
     case 'wordcloud': return [prompt('☁️ Saisissez un ou deux mots sur votre téléphone')];
     case 'openended': return [prompt('💬 Saisissez votre réponse sur votre téléphone')];
@@ -504,6 +522,7 @@ const COLORS = ['var(--a0)', 'var(--a1)', 'var(--a2)', 'var(--a3)', '#ffffff', '
 /** Main reveal visual and the line underneath it, per question type. */
 function revealViews(q, r) {
   const none = r.answeredCount === 0;
+  if (r.type === 'blind') return blindReveal(q, r);
   switch (r.type) {
     case 'quiz': case 'truefalse': case 'poll': {
       const max = Math.max(1, ...r.counts);
@@ -554,6 +573,32 @@ function revealViews(q, r) {
       return [none ? prompt('Aucune réponse') : el('div', { class: 'resp-list' }, ...r.responses.map((x) => el('div', {}, el('span', {}, x.text), x.count > 1 ? el('span', {}, `×${x.count}`) : null))), []];
     default: return [prompt(''), []];
   }
+}
+
+/** Reveal for blind questions: track card, then per-part answers and distribution. */
+function blindReveal(q, r) {
+  const card = lastMsg?.blind?.reveal ? trackCard(lastMsg.blind.reveal) : null;
+  const partView = (p) => {
+    if (p.mode === 'mc') {
+      const max = Math.max(1, ...p.counts);
+      return el('div', { class: 'prompt-box host-part' }, el('div', { class: 'host-part-label' }, `${p.label} · ${p.correctCount}/${p.answered} juste(s)`),
+        el('div', { class: 'host-part-choices' }, ...p.choices.map((c, i) => el('span', { class: `tile c${i}${p.correct.includes(i) ? '' : ' dim'}` },
+          el('span', { html: SHAPES[i] }), el('span', {}, `${c} (${p.counts[i]})`), p.correct.includes(i) ? el('span', { class: 'check' }, '✔') : null))),
+        el('div', { class: 'mini-bars', 'aria-hidden': 'true' }, ...p.counts.map((n, i) => el('span', { class: `tile c${i}`, style: `height:${(n / max) * 100}%` }))));
+    }
+    return el('div', { class: 'prompt-box host-part' }, el('div', { class: 'host-part-label' }, `${p.label} · ${p.correctCount}/${p.answered} juste(s)`),
+      el('div', { style: 'font-size:1.2em' }, `✔ ${p.answer}`),
+      p.responses.length ? el('div', { class: 'resp-list' }, ...p.responses.slice(0, 8).map((x) => el('div', {}, el('span', { class: x.correct ? 'ok' : 'no' }, `${x.correct ? '✔' : '✖'} ${x.text}`), el('span', {}, `×${x.count}`)))) : null);
+  };
+  if (r.counts) {
+    const max = Math.max(1, ...r.counts);
+    const bars = el('div', { class: 'bars', style: 'max-height:180px' }, ...r.counts.map((n, i) => el('div', { class: 'bar' },
+      el('span', {}, n),
+      el('div', { class: `fill tile c${i}${r.correct.length && !r.correct.includes(i) ? ' dim' : ''}`, style: `height:${(n / max) * 80 + 4}%;padding:0;min-height:6px` }),
+      el('span', { class: 'label', html: (SHAPES[i] || '') + (r.correct.includes(i) ? ' ✔' : '') }))));
+    return [el('div', { class: 'stack', style: 'align-items:center;width:100%' }, card, bars), choiceTiles(q, { correct: r.correct })];
+  }
+  return [el('div', { class: 'stack', style: 'align-items:center;width:100%' }, card), r.parts.map(partView)];
 }
 
 function boardRow(p, delayMs = 0) {
@@ -644,7 +689,7 @@ function onMessage(msg) {
   if (msg.players) renderPlayers(msg.players);
   renderLock(msg.locked);
   const blind = msg.blind;
-  for (const id of ['ready-round', 'q-round']) { $(id).classList.toggle('hidden', !blind); $(id).textContent = blind ? roundText(blind) : ''; }
+  for (const id of ['ready-round', 'q-round']) { $(id).classList.toggle('hidden', !blind); $(id).textContent = blind ? roundText(blind) + (blind.multiplierLabel ? ` · ⭐ ${blind.multiplierLabel}` : '') : ''; }
   $('q-audio-bar').classList.toggle('hidden', !blind);
   if (blind && blind.nextAudioUrl && msg.state !== 'LOBBY') player.preload(blind.nextAudioUrl, blind.nextStartTime);
 
@@ -675,8 +720,9 @@ function onMessage(msg) {
       document.getElementById('q-num').textContent = blind ? `Morceau ${q.index + 1} sur ${q.total}` : `Question ${q.index + 1} sur ${q.total}`;
       document.getElementById('q-pin').textContent = msg.pin;
       const tag = document.getElementById('q-points');
-      tag.classList.toggle('hidden', q.points === 'standard' || ['poll', 'wordcloud', 'openended'].includes(q.type));
-      tag.textContent = q.points === 'double' ? '2× points' : 'Sans points';
+      const multLabel = blind && blind.multiplierLabel;
+      tag.classList.toggle('hidden', !multLabel && (q.points === 'standard' || ['poll', 'wordcloud', 'openended'].includes(q.type)));
+      tag.textContent = multLabel || (q.points === 'double' ? '2× points' : 'Sans points');
       document.getElementById('q-text').textContent = q.text;
       document.getElementById('q-answers').textContent = msg.answeredCount;
       document.getElementById('q-choices').replaceChildren(...questionBody(q));
@@ -735,11 +781,18 @@ function onMessage(msg) {
   renderCtrl(msg);
 }
 
+// Commands that move the game forward carry the phase they were meant for, so a
+// double click (or the remote and the screen pressing together) cannot skip a step.
+const PHASED = new Set(['start', 'skip', 'next', 'hide-board', 'restart-track']);
+let busy = false;
 async function hostAction(action, extra = {}) {
   S.unlock();
   player.unlock();
-  try { await api(`/api/games/${pin}/host-action`, { key: hostKey, action, ...extra }); }
-  catch (ex) { alert(ex.message); }
+  if (busy && PHASED.has(action)) return;
+  busy = PHASED.has(action);
+  try { await api(`/api/games/${pin}/host-action`, { key: hostKey, action, ...(PHASED.has(action) && lastMsg ? { expectState: lastMsg.state } : {}), ...extra }); }
+  catch (ex) { if (ex.code !== 'STALE_STATE') alert(ex.message); }
+  finally { busy = false; }
 }
 
 document.getElementById('btn-start').addEventListener('click', () => hostAction('start'));
@@ -755,6 +808,11 @@ $('c-close').addEventListener('click', () => hostAction('skip'));
 $('c-recover').addEventListener('click', () => { hostAction('recover'); if (lastMsg) syncAudio(lastMsg, true); });
 $('c-end').addEventListener('click', () => { if (confirm('Terminer la partie maintenant ? Le classement actuel deviendra le classement final.')) hostAction('end'); });
 $('ctrl-toggle').addEventListener('click', () => $('ctrl').classList.toggle('collapsed'));
+$('c-flow').addEventListener('change', (e) => {
+  const mode = e.target.value || null;
+  if (mode === 'automatic' && !confirm('Activer l’enchaînement entièrement automatique ? Les morceaux s’enchaîneront seuls (vous pourrez toujours mettre en pause).')) { e.target.value = lastMsg?.flow?.override || ''; return; }
+  hostAction('set-flow', { mode });
+});
 $('btn-sound-gate').addEventListener('click', () => {
   S.unlock();
   player.unlocked = false;

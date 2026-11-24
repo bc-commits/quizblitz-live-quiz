@@ -1,15 +1,15 @@
 {
   "name": "quizblitz",
-  "version": "2.0.0",
+  "version": "1.3.0-dev",
   "private": true,
   "description": "Live multiplayer music blind test and quiz for parties and events: white-label, admin, host screen, phones as buzzers",
   "main": "server.js",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch server.js",
-    "test": "node --disable-warning=ExperimentalWarning --test test/unit.test.js test/integration.test.js test/legacy.test.js",
-    "test:unit": "node --disable-warning=ExperimentalWarning --test test/unit.test.js",
-    "test:integration": "node --disable-warning=ExperimentalWarning --test test/integration.test.js test/legacy.test.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "test:unit": "node --disable-warning=ExperimentalWarning --test test/unit.test.js test/v11.unit.test.js",
+    "test:integration": "node --disable-warning=ExperimentalWarning --test test/integration.test.js test/legacy.test.js test/v11.integration.test.js",
     "lint": "node scripts/check-syntax.js",
     "build": "node scripts/check-syntax.js && node scripts/build-static.js",
     "demo:audio": "node scripts/generate-demo-audio.js"

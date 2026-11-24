@@ -19,6 +19,7 @@ const BT = require('./lib/blindtest');
 const Settings = require('./lib/settings');
 const Media = require('./lib/media');
 const Scoring = require('./lib/scoring');
+const Answers = require('./lib/answers');
 const { serializeGame, restoreGame } = require('./lib/gamestore');
 const { isOffensive, randomName, isGeneratedName } = require('./filter');
 
@@ -265,7 +266,7 @@ function blindPosition(q) {
   const b = q && q.blind;
   if (!b) return null;
   return { roundIndex: b.roundIndex, roundCount: b.roundCount, roundTitle: b.roundTitle, trackInRound: b.trackInRound,
-    tracksInRound: b.tracksInRound, questionType: b.questionType };
+    tracksInRound: b.tracksInRound, questionType: b.questionType, multiplier: b.multiplier || 1, multiplierLabel: b.multiplierLabel || '' };
 }
 
 /** What the host screen needs to play the excerpt; the answer card only once revealed. */
@@ -273,7 +274,8 @@ function blindHostView(g) {
   const q = currentQ(g);
   if (!q || !q.blind || g.state === S.ENDED) return null;
   const next = g.quiz.questions[g.qIndex + 1]?.blind;
-  const v = { ...blindPosition(q), audioUrl: q.blind.audioUrl, startTime: q.blind.startTime, duration: q.blind.duration,
+  const v = { ...blindPosition(q), multiplier: q.blind.multiplier || 1, multiplierLabel: q.blind.multiplierLabel || '',
+    audioUrl: q.blind.audioUrl, startTime: q.blind.startTime, duration: q.blind.duration,
     nextAudioUrl: next ? next.audioUrl : null, nextStartTime: next ? next.startTime : 0 };
   if (g.state === S.REVEAL || g.state === S.SCOREBOARD) v.reveal = q.blind.reveal;
   return v;
@@ -289,10 +291,27 @@ function blindPlayerView(g) {
 
 const pausedView = (g) => (g.paused ? { remainingMs: g.paused.remainingMs } : null);
 
+// ---------- automatic flow (manual / semi-auto / automatic) ----------
+// semi-auto: reveal -> scoreboard happens by itself after the reveal duration.
+// automatic: scoreboard -> next track (or podium) also happens by itself.
+// The next automatic step is a persisted server timestamp (g.autoAt), so it survives
+// a page refresh or a backend restart; browsers never drive the transitions.
+const effectiveFlow = (g) => g.flowOverride || currentQ(g)?.flow?.mode || 'manual';
+
+function scheduleAuto(g) {
+  g.autoAt = null;
+  const flow = effectiveFlow(g);
+  const f = currentQ(g)?.flow || {};
+  if (g.state === S.REVEAL && flow !== 'manual' && (f.reveal ?? 8) > 0) g.autoAt = Date.now() + (f.reveal ?? 8) * 1000;
+  if (g.state === S.SCOREBOARD && flow === 'automatic' && (f.scoreboard ?? 8) > 0) g.autoAt = Date.now() + (f.scoreboard ?? 8) * 1000;
+}
+
+const flowView = (g) => ({ mode: effectiveFlow(g), override: g.flowOverride || null, autoAt: g.paused ? null : (g.autoAt || null) });
+
 function hostSnapshot(g) {
   const base = { type: 'STATE', state: g.state, pin: g.pin, title: g.quiz.title, kind: g.quiz.kind || 'quiz', players: playerList(g),
     connectedCount: connectedCount(g), locked: g.locked, options: g.options, paused: pausedView(g), blind: blindHostView(g),
-    total: g.quiz.questions.length };
+    total: g.quiz.questions.length, flow: flowView(g) };
   if (g.state === S.GET_READY) return { ...base, question: publicQuestion(g), startsAt: g.questionStartsAt, readyMs: g.readyMs };
   if (g.state === S.QUESTION) {
     return { ...base, question: publicQuestion(g), endsAt: g.endsAt, openedAt: g.questionOpenedAt, answeredCount: g.answers.size };
@@ -336,13 +355,18 @@ function armTimers(g) {
   const now = Date.now();
   if (g.state === S.GET_READY) g.timer = setTimeout(() => startQuestion(g), Math.max(0, g.questionStartsAt - now));
   else if (g.state === S.QUESTION) g.timer = setTimeout(() => endQuestion(g), Math.max(0, g.endsAt + ANSWER_GRACE_MS - now));
+  else if ((g.state === S.REVEAL || g.state === S.SCOREBOARD) && g.autoAt) {
+    const expected = g.state;
+    g.timer = setTimeout(() => { if (g.state === expected && !g.paused) goNext(g); }, Math.max(0, g.autoAt - now));
+  }
 }
 
 function startGetReady(g) {
   endTimers(g);
   g.state = S.GET_READY;
   g.paused = null;
-  g.readyMs = isBlind(g) ? Math.max(1000, (g.quiz.settings?.countdownDuration ?? 3) * 1000) : GET_READY_MS;
+  g.autoAt = null;
+  g.readyMs = isBlind(g) ? Math.max(1000, (currentQ(g)?.flow?.countdown ?? g.quiz.settings?.countdownDuration ?? 3) * 1000) : GET_READY_MS;
   g.questionStartsAt = Date.now() + g.readyMs;
   g.answers = new Map();
   for (const p of g.players.values()) p.lastResult = null;
@@ -374,7 +398,20 @@ function endQuestion(g) {
     const a = g.answers.get(p.id);
     const verdict = a ? Q.judge(q, a.answer) : { correct: false, factor: 0 };
     let points = 0;
-    if (scored) {
+    let blindExtra = null;
+    if (q.type === 'blind') {
+      const r = Scoring.blindPoints({ parts: verdict.parts || [], totalParts: q.parts.length, answered: !!a, responseMs: a ? a.responseMs : null,
+        timeLimitMs: q.time * 1000, streak: p.streak, cfg: q.scoring, multiplier: q.multiplier || 1 });
+      points = r.points;
+      p.streak = r.streak;
+      blindExtra = { partial: r.partial, breakdown: r.breakdown, multiplier: q.multiplier || 1,
+        parts: q.parts.map((qp) => {
+          const j = (verdict.parts || []).find((x) => x.key === qp.key);
+          const given = a && a.answer[qp.key] !== undefined ? (qp.mode === 'mc' ? qp.choices[a.answer[qp.key]] : a.answer[qp.key]) : null;
+          return { key: qp.key, label: qp.label, answered: given !== null, correct: !!(j && j.correct), yourAnswer: given, ambiguous: !!(j && j.ambiguous),
+            correctText: qp.mode === 'mc' ? qp.correct.map((c) => qp.choices[c]).join(' / ') : qp.answer };
+        }) };
+    } else if (scored) {
       if (verdict.correct) {
         p.streak += 1;
         points = Math.round((Scoring.speedPoints(a.responseMs, q.time * 1000, g.scoring) * verdict.factor
@@ -388,8 +425,9 @@ function endQuestion(g) {
     p.lastResult = { answered: !!a, scored, isCorrect: scored && verdict.correct, points, streak: p.streak,
       responseMs: a ? a.responseMs : null,
       correctText: scored ? Q.describeCorrect(q) : null, yourAnswer: a ? Q.describeAnswer(q, a.answer) : null,
-      reveal: q.blind ? q.blind.reveal : null };
-    record[p.id] = { answer: a ? a.answer : null, correct: scored && verdict.correct, points, responseMs: a ? a.responseMs : null };
+      reveal: q.blind ? q.blind.reveal : null, ...(blindExtra || {}) };
+    record[p.id] = { answer: a ? a.answer : null, correct: scored && verdict.correct, points, responseMs: a ? a.responseMs : null,
+      parts: blindExtra ? blindExtra.parts.map((x) => ({ key: x.key, answered: x.answered, correct: x.correct })) : undefined };
   }
   g.history[g.qIndex] = record;
 
@@ -403,13 +441,19 @@ function endQuestion(g) {
 
   g.state = S.REVEAL;
   g.lastReveal = Q.revealSummary(q, [...g.answers.values()].map((x) => x.answer));
+  scheduleAuto(g);
   broadcastState(g);
+  armTimers(g);
 }
 
 function goNext(g) {
+  endTimers(g);
+  g.paused = null;
   if (g.state === S.REVEAL) {
     g.state = S.SCOREBOARD;
+    scheduleAuto(g);
     broadcastState(g);
+    armTimers(g);
   } else if (g.state === S.SCOREBOARD) {
     if (g.qIndex + 1 < g.quiz.questions.length) { g.qIndex++; startGetReady(g); }
     else finishGame(g, true);
@@ -826,6 +870,13 @@ async function handleAdmin(req, res, url, parts) {
     }
   }
 
+  // --- free-text answer tester (editor)
+  if (action === 'answers' && parts[3] === 'test' && req.method === 'POST') {
+    const b = await readBody(req, 16 * 1024);
+    const aliases = Array.isArray(b.aliases) ? b.aliases.slice(0, 20).map((x) => String(x).slice(0, 120)) : [];
+    return sendJson(res, 200, Answers.matchFreeText(String(b.input || '').slice(0, 120), { answer: String(b.answer || '').slice(0, 120), aliases, ignoreArticles: b.ignoreArticles !== false, typoTolerance: b.typoTolerance === true }));
+  }
+
   // --- media
   if (action === 'media') {
     if (req.method === 'GET' && !parts[3]) {
@@ -872,8 +923,22 @@ async function handleAdmin(req, res, url, parts) {
 
 // ---------- game API ----------
 
+/** Options for validating / converting blind tests: library lookup and global scoring. */
+function blindOptions() {
+  return { library: typeof store.getMusicTrack === 'function' ? (id) => store.getMusicTrack(db, id) : undefined,
+    appScoring: Scoring.fromClassicSettings(settings.scoring) };
+}
+
+const HOST_ACTIONS = new Set(['start', 'skip', 'close', 'next', 'hide-board', 'pause', 'resume', 'restart-track', 'recover', 'kick', 'lock', 'unlock', 'end', 'set-flow']);
+
 function hostActionHandler(g, body) {
   const now = Date.now();
+  if (!HOST_ACTIONS.has(body.action)) throw httpError(400, 'Action inconnue');
+  // Double-press protection: a command sent for a phase that is already over is refused,
+  // and the same command repeated within 800 ms is ignored.
+  if (body.expectState && body.expectState !== g.state) throw httpError(409, 'La partie a déjà changé de phase', { code: 'STALE_STATE' });
+  const sig = `${body.action}:${g.state}:${g.qIndex}:${body.playerId || ''}`;
+  if (g.lastCommand && g.lastCommand.sig === sig && now - g.lastCommand.at < 800 && !['lock', 'unlock'].includes(body.action)) return { deduped: true };
   switch (body.action) {
     case 'start':
       if (g.state !== S.LOBBY) throw httpError(409, 'La partie a déjà commencé');
@@ -891,11 +956,20 @@ function hostActionHandler(g, body) {
       goNext(g);
       break;
     case 'hide-board':
-      if (g.state === S.SCOREBOARD) { g.state = S.REVEAL; broadcastState(g); }
+      if (g.state === S.SCOREBOARD) { endTimers(g); g.paused = null; g.state = S.REVEAL; g.autoAt = null; broadcastState(g); }
       break;
+    case 'set-flow': {
+      const mode = body.mode === null || body.mode === '' ? null : String(body.mode);
+      if (mode !== null && !BT.FLOW_MODES.includes(mode)) throw httpError(400, 'Mode d’enchaînement inconnu');
+      g.flowOverride = mode;
+      if (!g.paused && (g.state === S.REVEAL || g.state === S.SCOREBOARD)) { scheduleAuto(g); armTimers(g); }
+      broadcastState(g);
+      break;
+    }
     case 'pause': {
-      if (g.paused || (g.state !== S.GET_READY && g.state !== S.QUESTION)) throw httpError(409, 'Rien à mettre en pause');
-      const deadline = g.state === S.GET_READY ? g.questionStartsAt : g.endsAt;
+      const autoPhase = (g.state === S.REVEAL || g.state === S.SCOREBOARD) && g.autoAt;
+      if (g.paused || (g.state !== S.GET_READY && g.state !== S.QUESTION && !autoPhase)) throw httpError(409, 'Rien à mettre en pause');
+      const deadline = g.state === S.GET_READY ? g.questionStartsAt : g.state === S.QUESTION ? g.endsAt : g.autoAt;
       g.paused = { at: now, remainingMs: Math.max(0, deadline - now) };
       endTimers(g);
       broadcastState(g);
@@ -905,7 +979,8 @@ function hostActionHandler(g, body) {
       if (!g.paused) throw httpError(409, "La partie n'est pas en pause");
       const pausedFor = now - g.paused.at;
       if (g.state === S.GET_READY) g.questionStartsAt = now + g.paused.remainingMs;
-      else { g.endsAt = now + g.paused.remainingMs; g.questionOpenedAt += pausedFor; } // the pause does not count as thinking time
+      else if (g.state === S.QUESTION) { g.endsAt = now + g.paused.remainingMs; g.questionOpenedAt += pausedFor; } // the pause does not count as thinking time
+      else g.autoAt = now + g.paused.remainingMs;
       g.paused = null;
       broadcastState(g);
       armTimers(g);
@@ -943,6 +1018,8 @@ function hostActionHandler(g, body) {
     default:
       throw httpError(400, 'Action inconnue');
   }
+  g.lastCommand = { sig, at: now }; // only commands that succeeded count for the double-press guard
+  return { deduped: false };
 }
 
 const findPlayer = (g, token) => (typeof token === 'string' && token ? [...g.players.values()].find((x) => x.token === token) : null);
@@ -984,8 +1061,8 @@ async function handleApi(req, res, url) {
       if (!admin) return sendJson(res, 401, { error: 'Connexion administrateur requise pour lancer un blind test.', code: 'ADMIN_SIGN_IN' });
       const row = store.getBlindTest(db, String(body.blindTestId));
       if (!row) return sendJson(res, 404, { error: 'Blind test introuvable' });
-      const { blindTest } = BT.assertValid(row.blindTest);
-      quiz = BT.toGameQuiz(blindTest);
+      const { blindTest } = BT.assertValid(row.blindTest, blindOptions());
+      quiz = BT.toGameQuiz(blindTest, blindOptions());
       const allowLateJoin = o.allowLateJoin !== undefined ? !!o.allowLateJoin : (blindTest.settings.allowLateJoin && settings.allowLateJoin);
       options = { shuffleQuestions: false, shuffleAnswers: !!blindTest.settings.shuffleChoices, nameGenerator: !!o.nameGenerator,
         lockOnStart: !allowLateJoin, showOnDevices: true };
@@ -1040,8 +1117,8 @@ async function handleApi(req, res, url) {
   if (req.method === 'POST' && action === 'host-action') {
     const body = await readBody(req, 8192);
     if (!isHost(body.key)) return sendJson(res, 403, { error: 'Not the host' });
-    hostActionHandler(g, body);
-    return sendJson(res, 200, { ok: true, state: g.state });
+    const r = hostActionHandler(g, body);
+    return sendJson(res, 200, { ok: true, state: g.state, deduped: !!(r && r.deduped) });
   }
 
   if (req.method === 'POST' && action === 'join') {
@@ -1175,7 +1252,7 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     const status = err.status || 400;
     if (status >= 500 || !err.status) console.error(err);
-    if (!res.headersSent) sendJson(res, status, { error: err.message || 'Requête invalide', details: err.details });
+    if (!res.headersSent) sendJson(res, status, { error: err.message || 'Requête invalide', code: err.code, details: err.details });
     else res.end();
   }
 });

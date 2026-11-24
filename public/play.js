@@ -202,7 +202,7 @@ function onMessage(msg) {
       break;
     case 'GET_READY':
       $('ready-num').textContent = blind ? `${blind.roundTitle} · ${trackLabel(blind)}` : `Question ${q.index + 1} sur ${q.total}`;
-      $('ready-title').textContent = blind ? '🎧 Écoutez bien…' : 'Préparez-vous !';
+      $('ready-title').textContent = blind ? (blind.multiplierLabel ? `⭐ ${blind.multiplierLabel}` : '🎧 Écoutez bien…') : 'Préparez-vous !';
       shownQuestion = -1; // a restarted track must show fresh, enabled buttons
       if (msg.paused) $('ready-count').textContent = Math.ceil(msg.paused.remainingMs / 1000);
       else stopTimer = countdown(msg.startsAt, 0, (s) => { $('ready-count').textContent = s; });
@@ -236,7 +236,7 @@ function onMessage(msg) {
 
 function renderQuestion(q, blind) {
   $('a-num').textContent = `${q.index + 1} / ${q.total}${q.points === 'double' ? ' · 2×' : ''}`;
-  $('a-round').textContent = blind ? `🎵 ${blind.roundTitle} · ${trackLabel(blind)}` : '';
+  $('a-round').textContent = blind ? `🎵 ${blind.roundTitle} · ${trackLabel(blind)}${blind.multiplierLabel ? ` · ${blind.multiplierLabel}` : ''}` : '';
   $('a-round').classList.toggle('hidden', !blind);
   $('a-text').textContent = q.text;
   $('a-text').classList.toggle('hidden', !q.showOnDevices);
@@ -248,6 +248,11 @@ function renderQuestion(q, blind) {
   custom.replaceChildren();
   const send = (answer) => submit(q.index, answer, custom);
 
+  box.classList.toggle('many', !!q.choices && q.choices.length > 4);
+  if (q.type === 'blind' && (q.parts.length > 1 || q.parts[0].mode === 'text')) {
+    custom.replaceChildren(partsForm(q, custom));
+    return;
+  }
   if (q.choices) {
     box.replaceChildren(...q.choices.map((c, i) => el('button', {
       class: `tile c${i}`,
@@ -313,6 +318,35 @@ function renderQuestion(q, blind) {
   }
 }
 
+/** Artist + title and/or free-text answers: every part is optional, at least one is required. */
+function partsForm(q, container) {
+  const values = {};
+  const sendBtn = el('button', { class: 'accent', type: 'submit', disabled: '' }, 'Valider ma réponse');
+  const refresh = () => { sendBtn.disabled = !Object.keys(values).length; };
+  const sections = q.parts.map((p) => {
+    if (p.mode === 'mc') {
+      const buttons = p.choices.map((c, i) => el('button', {
+        type: 'button', class: `tile c${i}`, 'aria-pressed': 'false',
+        onclick: () => {
+          const same = values[p.key] === i;
+          if (same) delete values[p.key]; else values[p.key] = i;
+          buttons.forEach((b, j) => b.setAttribute('aria-pressed', String(!same && j === i)));
+          refresh();
+        },
+      }, el('span', { html: SHAPES[i] }), el('span', {}, c)));
+      return el('div', { class: 'part' }, el('h3', {}, p.label), el('div', { class: 'part-choices' }, ...buttons));
+    }
+    const field = el('input', { type: 'text', maxlength: String(p.maxLength || 80), 'aria-label': p.label, placeholder: `${p.label} (facultatif si vous ne savez pas)`,
+      autocomplete: 'off', autocapitalize: 'words', enterkeyhint: 'send',
+      oninput: (e) => { if (e.target.value.trim()) values[p.key] = e.target.value; else delete values[p.key]; refresh(); } });
+    return el('div', { class: 'part' }, el('h3', {}, p.label), field);
+  });
+  const form = el('form', { class: 'phone-input parts', onsubmit: (e) => { e.preventDefault(); if (Object.keys(values).length) submit(q.index, { ...values }, container); } },
+    ...sections, sendBtn, el('p', { class: 'sub', style: 'margin:0;color:var(--on-bg-muted)' }, q.parts.length > 1 ? 'Vous pouvez ne répondre qu’à une partie : chaque bonne partie rapporte des points.' : ''),
+    el('p', { class: 'error', id: 'a-err', role: 'alert' }));
+  return form;
+}
+
 async function submit(questionIndex, answer, box) {
   box.querySelectorAll('button, input, textarea').forEach((b) => { b.disabled = true; });
   show('s-sent');
@@ -343,16 +377,21 @@ function renderResult(r, qIndex) {
     $('r-streak').textContent = '';
     $('r-points').textContent = r.answered ? `Votre réponse : ${r.yourAnswer}` : 'Pas de réponse cette fois';
     $('r-correct').classList.add('hidden');
+    $('r-parts').classList.add('hidden');
     if (fresh) Sound.neutral();
   } else {
-    body.classList.add(r.isCorrect ? 'result-good' : 'result-bad');
-    $('r-icon').textContent = r.isCorrect ? '✔' : '✖';
-    $('r-title').textContent = r.isCorrect ? 'Bonne réponse !' : r.answered ? 'Mauvaise réponse' : 'Temps écoulé';
+    const good = r.isCorrect || r.partial;
+    body.classList.add(good ? 'result-good' : 'result-bad');
+    $('r-icon').textContent = r.isCorrect ? '✔' : r.partial ? '½' : '✖';
+    $('r-title').textContent = r.isCorrect ? 'Bonne réponse !' : r.partial ? 'En partie juste !' : r.answered ? 'Mauvaise réponse' : 'Temps écoulé';
     $('r-streak').textContent = r.streak >= 2 ? `🔥 Série de ${r.streak} bonnes réponses` : '';
-    $('r-points').textContent = r.isCorrect ? `+ ${r.points.toLocaleString('fr-FR')}` : 'Aucun point cette fois';
+    $('r-points').textContent = r.points > 0 ? `+ ${r.points.toLocaleString('fr-FR')}${r.multiplier > 1 ? ` (x${r.multiplier})` : ''}` : r.points < 0 ? `${r.points.toLocaleString('fr-FR')}` : 'Aucun point cette fois';
     $('r-correct').textContent = `Bonne réponse : ${r.correctText}`;
     $('r-correct').classList.toggle('hidden', r.isCorrect || !r.correctText);
-    if (fresh) (r.isCorrect ? Sound.correct : Sound.wrong)();
+    const parts = r.parts && r.parts.length > 1 ? r.parts : null;
+    $('r-parts').replaceChildren(...(parts ? parts.map((x) => el('li', {}, `${x.correct ? '✔' : x.answered ? '✖' : '—'} ${x.label} : ${x.answered ? x.yourAnswer : 'sans réponse'}`)) : []));
+    $('r-parts').classList.toggle('hidden', !parts);
+    if (fresh) (good ? Sound.correct : Sound.wrong)();
   }
   const track = r.reveal ? `🎵 ${r.reveal.title} — ${r.reveal.artist}${r.reveal.year ? ` (${r.reveal.year})` : ''}` : '';
   $('r-track').textContent = track;

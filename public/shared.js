@@ -21,8 +21,13 @@ export const SHAPES = [
   '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 1 31 16 16 31 1 16z"/></svg>',  // diamond
   '<svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14"/></svg>',     // circle
   '<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="3" width="26" height="26" rx="2"/></svg>', // square
+  // Extra marks for blind test questions with 5 to 8 choices.
+  '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 30 12 25 29H7L2 12z"/></svg>',              // pentagon
+  '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 3h14l7 13-7 13H9L2 16z"/></svg>',              // hexagon
+  '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m16 2 4.2 9 9.8 1.2-7.2 6.8 1.9 9.8L16 24l-8.7 4.8 1.9-9.8L2 12.2l9.8-1.2z"/></svg>', // star
+  '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 29 4 17A7 7 0 0 1 16 7a7 7 0 0 1 12 10z"/></svg>', // heart
 ];
-export const SHAPE_NAMES = ['Triangle', 'Diamond', 'Circle', 'Square'];
+export const SHAPE_NAMES = ['Triangle', 'Losange', 'Rond', 'Carré', 'Pentagone', 'Hexagone', 'Étoile', 'Cœur'];
 
 // Avatar = character + optional accessory. Counts must match server.js.
 export const AVATARS = [
