@@ -12,9 +12,13 @@
     "test:integration": "node --disable-warning=ExperimentalWarning --test test/integration.test.js test/legacy.test.js test/v11.integration.test.js",
     "lint": "node scripts/check-syntax.js",
     "build": "node scripts/check-syntax.js && node scripts/build-static.js",
-    "demo:audio": "node scripts/generate-demo-audio.js"
+    "demo:audio": "node scripts/generate-demo-audio.js",
+    "test:e2e": "playwright test"
   },
   "engines": {
     "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
   }
 }

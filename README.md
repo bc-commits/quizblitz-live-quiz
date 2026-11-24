@@ -13,6 +13,15 @@ classique d'origine (9 types de questions, bibliothèque, rapports) reste dispon
 
 > 📸 Captures d'écran à ajouter dans `docs/media/` : accueil, administration, éditeur, lobby, morceau, révélation, téléphone, podium.
 
+## Nouveautés V1.1 → V1.3
+
+- **Jeu** : QCM de 2 à 8 propositions ; questions artiste, titre, **artiste + titre** (points partiels), année, décennie, personnalisée ; **saisie libre** avec variantes et tolérance limitée ; presets de scoring (classique, compétitif, soirée, détente, personnalisé) ; **questions bonus x2 / finale x3** ; réglages par manche ; enchaînement **manuel, semi-automatique ou automatique** (persistant, reprend après redémarrage).
+- **Animation** : **télécommande sur téléphone** (`/host/remote`) avec réponses, morceau suivant et commandes ; **mode équipes** (2 à 8, somme / moyenne / meilleurs) ; validation manuelle des réponses proches.
+- **Bibliothèque musicale** réutilisable dans plusieurs blind tests sans dupliquer les fichiers, recherche et filtres, **propositions générées automatiquement** (par règles), import / export JSON et CSV avec simulation.
+- **Analyses** : rapports blind test (par morceau, faits marquants, équipes, CSV / JSON / impression), tableau de bord temps réel, **journal d’audit**.
+
+Documentation : [MODES_DE_JEU](docs/MODES_DE_JEU.md) · [TELECOMMANDE_ANIMATEUR](docs/TELECOMMANDE_ANIMATEUR.md) · [BIBLIOTHEQUE_MUSICALE](docs/BIBLIOTHEQUE_MUSICALE.md) · [RAPPORTS](docs/RAPPORTS.md) · [MIGRATION_V1_VERS_V1_3](docs/MIGRATION_V1_VERS_V1_3.md).
+
 ## Fonctionnalités
 
 - **Administration** (`/admin`) sécurisée : tableau de bord, blind tests, parties en cours, historique, médias, paramètres.
@@ -24,7 +33,7 @@ classique d'origine (9 types de questions, bibliothèque, rapports) reste dispon
 
 ## Prérequis
 
-- **Node.js 22.13 ou plus récent** (SQLite intégré). Aucune dépendance npm.
+- **Node.js 22.13 ou plus récent** (SQLite intégré). Aucune dépendance npm en production (Playwright uniquement pour le test navigateur, en dépendance de développement).
 
 ## Installation et lancement en local
 
@@ -71,7 +80,8 @@ Voir [docs/FORMAT_BLIND_TEST.md](docs/FORMAT_BLIND_TEST.md) et l'exemple `public
 ## Tests
 
 ```bash
-npm test         # 34 tests : unitaires, intégration (serveur réel), anciens tests du quiz classique
+npm test          # 75 tests : unitaires, intégration (serveur réel), migration V1, anciens tests du quiz classique
+npm run test:e2e  # scénario navigateur Playwright (après npm install && npx playwright install chromium)
 npm run lint
 npm run build
 ```
@@ -94,6 +104,12 @@ lib/blindtest.js     format music-blind-test : validation, conversion en questio
 lib/scoring.js       calcul des points (configurable)
 lib/media.js         uploads sécurisés et pilote de stockage
 lib/gamestore.js     instantanés des parties (reprise après redémarrage)
+lib/answers.js       normalisation et jugement de la saisie libre
+lib/library.js       bibliothèque musicale (validation, CSV)
+lib/distractors.js   propositions générées par règles
+lib/teams.js         équipes et scores d'équipe
+lib/reports.js       rapports blind test
+lib/admin-extra.js   API admin : bibliothèque, imports, audit, rapports
 questions.js         types de questions (quiz classique et QCM)
 views/               pages HTML (gabarits rendus par le serveur)
 public/              JS / CSS / audio de démonstration (statiques)

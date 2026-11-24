@@ -41,7 +41,7 @@ const config = {
   routes: [
     // Dynamic routes always go to the backend (never cached by the CDN).
     { src: '^/(api|media)/(.*)$', dest: `${backend}/$1/$2` },
-    { src: '^/(|host|play|admin|library|reports|manifest\\.webmanifest)$', dest: `${backend}/$1` },
+    { src: '^/(|host|host/remote|play|admin|library|reports|manifest\\.webmanifest)$', dest: `${backend}/$1` },
     { src: '^/join/(\\d{6})/?$', dest: `${backend}/join/$1` },
     // Static assets: short cache with revalidation (file names are not hashed).
     { src: '^/(.*)\\.(js|css|svg|json)$', headers: { 'Cache-Control': 'public, max-age=0, must-revalidate', ...security }, continue: true },

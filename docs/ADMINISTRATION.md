@@ -24,6 +24,8 @@ d'erreur identique quel que soit le champ erroné.
 
 | Menu | Rôle |
 |---|---|
+| **Bibliothèque musicale** | fiches réutilisables, recherche, filtres, import / export, médias inutilisés (voir BIBLIOTHEQUE_MUSICALE.md) |
+| **Journal d’audit** | actions importantes des administrateurs (voir plus bas) |
 | **Tableau de bord** | nombre de blind tests et de morceaux, parties en cours, joueurs connectés, historique récent, avertissements de configuration, accès rapides |
 | **Blind tests › Tous** | liste (actifs / archivés) : lancer, modifier, dupliquer, exporter JSON, archiver, supprimer (avec confirmation) |
 | **Blind tests › Nouveau** | éditeur |
@@ -35,7 +37,17 @@ d'erreur identique quel que soit le champ erroné.
 | **Paramètres › Apparence** | logos, favicon, image d'accueil, couleurs, thème, arrondi, aperçu, restauration |
 | **Paramètres › Jeu** | expiration des parties, joueurs max, rejoindre en cours de partie, joueurs déconnectés, barème des points |
 
+## Journal d’audit
+
+Enregistré : connexions réussies et échouées, modifications des paramètres, téléversements et suppressions de médias, créations / modifications / archivages / suppressions de morceaux et de blind tests, imports, reprise de partie, ouverture de la télécommande par l’admin, fin forcée, suppression de partie, exclusion de joueur, validation manuelle d’une réponse.
+Jamais enregistré : mot de passe, cookie, jeton animateur ou joueur, secret, contenu de fichier. L’adresse IP n’est conservée que pour les **échecs de connexion** (détection de force brute).
+Conservation : `AUDIT_RETENTION_DAYS` (180 jours par défaut), purge au démarrage puis chaque jour.
+
 ## Éditeur de blind test
+
+V1.1 → V1.3 (voir MODES_DE_JEU.md) : propositions de 2 à 8 (ajouter, supprimer, monter, compteur, doublons signalés en rouge), types artist / title / artist-title / year / decade / custom, saisie libre avec variantes et testeur de réponse, multiplicateur par morceau, réglages de manche repliables (scoring, durées, multiplicateur, enchaînement), scoring et enchaînement du blind test, **Ajouter depuis la bibliothèque**, **🎲 Générer** / **↻ Autres propositions** / **Verrouiller**, **Lier les morceaux à la bibliothèque**.
+
+Fonctions V1 :
 
 - Titre, description, réglages (compte à rebours, durée d'extrait par défaut, rejoindre en cours, changement de réponse, mélange des propositions).
 - Manches : ajouter, renommer, choisir le type de question, réordonner (↑ ↓), supprimer.
@@ -47,7 +59,7 @@ d'erreur identique quel que soit le champ erroné.
 
 ## Lancer et animer une partie
 
-1. **Blind tests › ▶ Lancer** : la partie est créée et l'écran animateur s'ouvre (à afficher sur le vidéoprojecteur).
+1. **Blind tests › ▶ Lancer** : fenêtre de lancement (mode équipes facultatif : nombre, affectation, calcul du score, verrouillage, noms), puis l’écran animateur s’ouvre (à afficher sur le vidéoprojecteur). **📱 Télécommande** associe votre téléphone (TELECOMMANDE_ANIMATEUR.md).
 2. Lobby : nom et logo, titre du blind test, QR code (`/play?pin=…`, le PIN est pré-rempli), adresse, PIN, joueurs. Verrouiller / déverrouiller, retirer un joueur.
 3. **Lancer ▶** (ce clic autorise aussi le son dans le navigateur).
 4. Barre de commandes en bas de l'écran : état courant, joueurs connectés / inscrits, réponses reçues, état du temps réel, erreurs audio ; **Pause / Reprendre**, **Relancer** (reprend le morceau au compte à rebours, réponses de ce morceau annulées), **Son** (coupe le son localement), **Révéler** (ferme les réponses), **volume**, **Débloquer** (renvoie l'état et relance les minuteurs, ne supprime rien), **Terminer** (avec confirmation). « ☰ » réduit la barre.

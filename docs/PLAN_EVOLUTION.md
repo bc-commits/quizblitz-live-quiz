@@ -1,35 +1,32 @@
-# Plan d'évolution
+# Plan d’évolution
 
-Priorités proposées après le MVP, de la plus utile à la plus ambitieuse.
+## Réalisé
+
+| Version | Fonction |
+|---|---|
+| V1 | administration, marque blanche, blind tests QCM, écran animateur avec audio, QR et PIN, téléphones, scoring, podium, rapports, persistance et reprise des parties |
+| V1.1 | QCM de 2 à 8 choix ; types artist, title, artist-title, year, decade, custom ; presets de scoring et scoring personnalisé ; multiplicateurs ; réglages par manche ; enchaînement manuel / semi-auto / automatique persistant |
+| V1.2 | télécommande animateur ; bibliothèque musicale réutilisable ; distracteurs par règles ; import et export JSON/CSV ; redimensionnement des images ; journal d’audit |
+| V1.3 | équipes (sum, average, top-n) ; saisie libre avec alias et tolérance limitée ; artiste + titre mixte ; validation manuelle ; rapports blind test ; tableau de bord temps réel |
 
 ## Court terme
 
-1. **Télécommande animateur** : une vue `/host/remote` sur le téléphone de l'animateur (mêmes droits via la clé de partie), affichant le morceau en cours et le suivant, pendant que l'écran projeté reste sans indice.
-2. **Enchaînement automatique** optionnel en utilisant `revealDuration` et `scoreboardDuration` (déjà dans le format).
-3. **Test Playwright** : admin qui renomme et change le logo, animateur, 3 joueurs, 2 morceaux, classement, podium (navigateurs pilotés en parallèle, audio silencieux).
-4. **Traduction complète** de l'éditeur de quiz classique (`/host`, `/library`, `/reports`) encore partiellement en anglais, et sélecteur de langue utilisant `defaultLanguage`.
-5. **Redimensionnement des images** téléversées (logo, pochettes) côté navigateur avant envoi (canvas), sans dépendance serveur.
-6. Utiliser le **logo pour fond sombre** automatiquement en thème clair/sombre.
+1. Rapports par équipe enrichis (évolution du score d’équipe morceau par morceau).
+2. Logo pour fond sombre appliqué automatiquement selon le thème.
+3. Traduction complète de l’éditeur de quiz classique (`/host`, `/library`, `/reports`) et sélecteur de langue basé sur `defaultLanguage`.
+4. Édition des fiches de bibliothèque directement depuis l’éditeur de blind test.
+5. Affichage d’une étape « description de la manche » à l’écran au début de chaque manche.
 
-## Moyen terme : nouveaux modes de jeu
+## Moyen terme (jeu)
 
-Le format prévoit `answerMode` et `questionType` :
-- `free-text` : saisie libre, comparaison tolérante (accents, casse, articles) — le type `typeanswer` existant fournit déjà la fonction `canon`.
-- Réponses multiples artiste + titre (points partiels).
-- `buzzer` : premier à buzzer, validation par l'animateur.
-- `teams` : équipes choisies au lobby, score d'équipe.
-- Questions bonus (points doublés : le champ `points: 'double'` existe déjà dans le moteur).
+- **Buzzer** : premier à buzzer, validation par l’animateur, pénalité facultative.
+- Questions bonus « à double réponse » (année et artiste), réponses par paliers.
+- Réactions et émojis des joueurs.
 
-## Infrastructure
+## Infrastructure (non réalisé, volontairement hors de ce chantier)
 
-- **Pilotes de stockage objet** (`lib/media.js`) : Cloudflare R2 / S3 (signature SigV4), Vercel Blob, Supabase Storage. URL publiques non signées à nom aléatoire, ou URL signées longues renouvelées à chaque morceau.
-- **Plusieurs instances** : publier les messages des parties via Redis pub/sub ou Ably et prendre un verrou par partie ; la persistance des instantanés existe déjà.
-- **100 % serverless** (si un jour nécessaire) : état des parties dans Postgres/Redis, transitions calculées à la lecture depuis les horodatages (déjà la logique utilisée par `armTimers`), diffusion par Ably / Supabase Realtime.
-- **Multi-marques** : `app_settings` par organisation et sélection par domaine.
-- Postgres en option pour les hébergeurs sans disque.
-
-## Qualité
-
-- Rapports spécifiques blind test (morceaux les mieux / moins bien reconnus).
-- Statistiques de joueurs connectés en temps réel dans le tableau de bord (rafraîchissement automatique).
-- Journal d'audit des actions admin.
+- **Multi-instance** : diffusion des messages par **Redis pub/sub** ou **Ably** et verrou par partie. L’instantané persistant existe déjà.
+- **Pilotes de stockage objet** (`lib/media.js`) : Cloudflare R2 / S3 (SigV4), Vercel Blob, **Supabase Storage**.
+- **Migration PostgreSQL** pour les hébergeurs sans disque persistant.
+- **Multi-marques** : paramètres par organisation, sélectionnés par domaine.
+- **Architecture 100 % serverless** : état dans Postgres ou Redis, transitions calculées depuis les horodatages (logique déjà utilisée par `armTimers` et `autoAt`), temps réel par Ably ou Supabase Realtime.

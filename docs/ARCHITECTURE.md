@@ -28,9 +28,16 @@
 | Contenu des blind tests | table `blind_tests`, `lib/blindtest.js` |
 | Stockage des médias | table `media` (métadonnées) + pilote `lib/media.js` (octets) |
 | Données des parties et des joueurs | mémoire + instantané `live_games` (`lib/gamestore.js`) |
-| Scoring | `lib/scoring.js` |
-| Temps réel | SSE dans `server.js` (`openStream`, `push`, `broadcastState`) |
-| Questions et révélations (QCM, etc.) | `questions.js` |
+| Scoring (presets, multiplicateurs, quiz classique) | `lib/scoring.js` |
+| Temps réel | SSE dans `server.js` (`openStream`, `push`, `broadcastState`, flux télécommande `toRemotes`) |
+| Questions et révélations (QCM, type `blind` à parties) | `questions.js` |
+| Normalisation et jugement de la saisie libre | `lib/answers.js` |
+| Bibliothèque musicale, imports CSV/JSON | `lib/library.js`, `db.js` (`music_tracks`, `blind_test_tracks`), `lib/admin-extra.js` |
+| Distracteurs | `lib/distractors.js` |
+| Équipes | `lib/teams.js` |
+| Rapports blind test | `lib/reports.js` |
+| Journal d’audit | `db.js` (`audit_log`), `auditLog()` dans `server.js` |
+| Télécommande | `views/remote.html`, `public/remote.js`, routes `remote-*` dans `server.js` |
 
 ## Cycle d'une partie de blind test
 
@@ -44,7 +51,8 @@ LOBBY ─start─▶ GET_READY (compte à rebours) ─▶ QUESTION (extrait jou�
                                      └── (dernier morceau) ─▶ ENDED (podium, rapport enregistré)
 ```
 
-- Toutes les transitions sont horodatées par le serveur (`questionStartsAt`, `questionOpenedAt`, `endsAt`). Les minuteurs sont reconstruits depuis ces horodatages après une pause ou un redémarrage (`armTimers`).
+- Toutes les transitions sont horodatées par le serveur (`questionStartsAt`, `questionOpenedAt`, `endsAt`, et `autoAt` pour l’étape automatique suivante en semi-auto / automatique).
+- Révélation → classement → morceau suivant peuvent s’enchaîner seuls (`scheduleAuto`) ; la pause fige aussi ces étapes. Les minuteurs sont reconstruits depuis ces horodatages après une pause ou un redémarrage (`armTimers`).
 - La pause fige le temps restant ; à la reprise, `questionOpenedAt` est décalé de la durée de pause pour qu'elle ne compte pas dans le temps de réponse.
 - « Débloquer » (`recover`) renvoie l'état à tous les écrans et ré-arme les minuteurs, sans rien supprimer.
 
@@ -53,6 +61,7 @@ LOBBY ─start─▶ GET_READY (compte à rebours) ─▶ QUESTION (extrait jou�
 | Donnée | Admin | Écran animateur | Téléphone |
 |---|---|---|---|
 | URL audio de l'extrait | oui | oui (pendant le morceau) | **jamais** |
+| Réponse et notes, morceau suivant (télécommande) | oui | non (télécommande seulement) | **jamais** |
 | Titre / artiste / année / pochette | oui | seulement à la révélation | seulement à la révélation |
 | Bonne réponse | oui | seulement à la révélation | seulement à la révélation |
 | Notes internes | oui | non | non |
@@ -63,6 +72,7 @@ Les URL des fichiers téléversés sont aléatoires (`/media/<32 hex>.mp3`) : el
 ## Droits
 
 - **Admin** : cookie `qb_admin` (HttpOnly, SameSite=Strict, Secure en production, 12 h), limité à 5 tentatives de connexion / 15 min / IP.
+- **Télécommande** : code d’association à usage unique (5 min) puis jeton distinct, stocké haché, révocable ; mêmes commandes que l’animateur + informations secrètes.
 - **Animateur** : `hostKey` aléatoire propre à chaque partie (comparaison à temps constant). L'admin peut la récupérer pour reprendre une partie (« Reprendre l'animation »).
 - **Joueur** : jeton aléatoire propre à la partie, stocké dans le `sessionStorage` du téléphone (reconnexion après veille ou rafraîchissement).
 - **CSRF** : toute requête modifiante exige l'en-tête `X-QuizBlitz: 1`, impossible à envoyer depuis un autre site sans pré-vol CORS (jamais accepté).

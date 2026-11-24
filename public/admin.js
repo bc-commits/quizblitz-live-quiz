@@ -27,7 +27,16 @@ function toast(text, bad = false) {
 const fmtDate = (ms) => (ms ? new Date(ms).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : '—');
 const fmtSize = (n) => (n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} Mo` : `${Math.max(1, Math.round(n / 1024))} Ko`);
 const btn = (label, onclick, cls = 'small') => el('button', { class: cls, type: 'button', onclick }, label);
-const field = (label, input, help) => el('label', { class: 'field' }, label, input, help ? el('small', {}, help) : null);
+// A <label> only wraps a single form control; groups containing buttons get a <div> whose
+// heading labels the first control (a button inside a <label> would take the label's text as its name).
+const field = (label, input, help) => {
+  const single = ['INPUT', 'SELECT', 'TEXTAREA'].includes(input?.tagName);
+  if (single) return el('label', { class: 'field' }, label, input, help ? el('small', {}, help) : null);
+  const id = `f-${Math.random().toString(36).slice(2, 9)}`;
+  const control = input?.querySelector?.('input, select, textarea');
+  if (control && !control.getAttribute('aria-label')) control.setAttribute('aria-labelledby', id);
+  return el('div', { class: 'field', role: 'group', 'aria-labelledby': id }, el('span', { id }, label), input, help ? el('small', {}, help) : null);
+};
 const check = (label, checked, onchange) => {
   const box = el('input', { type: 'checkbox', onchange: (e) => onchange(e.target.checked) });
   box.checked = !!checked;

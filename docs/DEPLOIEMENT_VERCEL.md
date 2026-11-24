@@ -85,6 +85,7 @@ Backend (voir `.env.example`) :
 | `ALLOW_PUBLIC_QUIZ_HOSTING` | non | `false` pour réserver l'éditeur de quiz classique aux comptes |
 | `REPORTS_KEY` | non | clé de lecture des rapports de quiz classiques sans compte |
 | `MEDIA_STORAGE` | non | `local` (seul pilote livré) |
+| `AUDIT_RETENTION_DAYS` | non | durée de conservation du journal d’audit (180 jours par défaut) |
 | `PORT` | fourni par l'hébergeur | |
 
 Vercel : `BACKEND_URL` uniquement.
